@@ -32,6 +32,9 @@ pub mod handoff;
 pub mod hub;
 pub mod import;
 mod io_pool;
+/// mio's part the network threads use, in the browser (no sockets; the in-memory pipe).
+#[cfg(target_arch = "wasm32")]
+mod web_poll;
 pub mod menu;
 pub mod playerdata;
 pub mod prediction;

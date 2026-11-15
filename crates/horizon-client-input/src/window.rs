@@ -688,6 +688,9 @@ pub fn with_icon(attributes: winit::window::WindowAttributes) -> winit::window::
     #[cfg(target_os = "windows")]
     let attributes =
         winit::platform::windows::WindowAttributesExtWindows::with_taskbar_icon(attributes, icon);
+    // In the browser a window is a canvas: winit adds it to the page.
+    #[cfg(target_arch = "wasm32")]
+    let attributes = winit::platform::web::WindowAttributesExtWebSys::with_append(attributes, true);
     attributes
 }
 

@@ -2212,9 +2212,49 @@ fn draws_frame(format: wgpu::TextureFormatFeatures) -> bool {
 /// float, so values over 1 survive from the world to the tonemap and the HDR pass.
 const LINEAR_FRAME: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+/// Opens WebGPU in the browser, before the game starts: the page's async entry awaits it, and
+/// every renderer then opens on it (`surface_setup::web`). The adapter's name, or why not.
+#[cfg(target_arch = "wasm32")]
+pub async fn preopen_web() -> std::result::Result<String, String> {
+    surface_setup::web::preopen().await
+}
+
+/// The browser's device: the one [`preopen_web`] opened, with the window's canvas set up on it.
+#[cfg(target_arch = "wasm32")]
+async fn open_device(
+    window: &Arc<Window>,
+    offscreen: bool,
+    _api: GraphicsApi,
+    needs: surface_setup::DeviceNeeds,
+) -> Result<Opened> {
+    let (instance, adapter) = surface_setup::web::instance_and_adapter()
+        .ok_or("WebGPU was not opened before the game started (gfx::preopen_web)")?;
+    let surface = if offscreen {
+        None
+    } else {
+        Some(instance.create_surface(window.clone())?)
+    };
+    match surface_setup::open_adapter("WebGPU", window, surface.as_ref(), &adapter, needs).await {
+        Ok(adapted) => Ok(Opened {
+            instance,
+            surface,
+            adapter,
+            device: adapted.device,
+            queue: adapted.queue,
+            device_lost: adapted.device_lost,
+            configured: adapted.configured,
+        }),
+        Err(surface_setup::AdapterFailure::Failed(e))
+        | Err(surface_setup::AdapterFailure::CannotPresent(e)) => {
+            Err(format!("WebGPU: {e}").into())
+        }
+    }
+}
+
 /// Opens a device on the first of `backend_order`'s backends that gives one.
 /// Offscreen rendering needs no surface, so it can use a GPU the window's
 /// display cannot present from (a headless compositor).
+#[cfg(not(target_arch = "wasm32"))]
 async fn open_device(
     window: &Arc<Window>,
     offscreen: bool,
@@ -6527,8 +6567,8 @@ impl Renderer {
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         surface.configure(device, config);
-        let memory = pollster::block_on(memory.pop());
-        if let Some(e) = memory.or(pollster::block_on(validation.pop())) {
+        let memory = crate::gpu_thread::pop_now(memory);
+        if let Some(e) = memory.or(crate::gpu_thread::pop_now(validation)) {
             return Err(e.to_string());
         }
         if device_lost.load(std::sync::atomic::Ordering::Relaxed) {
@@ -6927,9 +6967,7 @@ impl Renderer {
             pack_post::PackPost::new(&device, &queue, &adapter, pack, format, world, &cancelled)
         };
         // A pack is not the game's code: a panic building it turns the pack off (#3525).
-        let thread = std::thread::Builder::new()
-            .name("Shader pack".into())
-            .spawn(move || crate::crash::contain(build));
+        let thread = crate::gpu_thread::spawn("Shader pack", move || crate::crash::contain(build));
         match thread {
             Ok(thread) => {
                 // The last pack doesn't draw this dimension meanwhile.
@@ -7453,6 +7491,18 @@ impl Renderer {
         // owner instead of submitting atlas patches to the invalid device.
         if self.device_lost() {
             return Err("the graphics device was lost".into());
+        }
+        // The browser sizes the canvas after the renderer opened on it, and its resize can
+        // reach the game before the renderer exists: follow the canvas every frame.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let size = self.window.inner_size();
+            if size.width > 0
+                && size.height > 0
+                && (size.width, size.height) != (self.config.width, self.config.height)
+            {
+                self.resize(size.width, size.height);
+            }
         }
         let saved = self.screenshot_saves.finished();
         self.saved_screenshots.extend(saved);
@@ -11711,8 +11761,8 @@ impl GpuChecks {
         Self { memory, validation }
     }
     fn pop(self) -> Option<wgpu::Error> {
-        let validation = pollster::block_on(self.validation.pop());
-        let memory = pollster::block_on(self.memory.pop());
+        let validation = crate::gpu_thread::pop_now(self.validation);
+        let memory = crate::gpu_thread::pop_now(self.memory);
         memory.or(validation)
     }
 }

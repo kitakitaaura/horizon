@@ -92,6 +92,44 @@ impl Hardware {
     }
 }
 
+/// In the browser: what the page can know of the machine (its threads); the OS probes aren't
+/// there.
+#[cfg(target_arch = "wasm32")]
+impl Hardware {
+    pub fn detect() -> Hardware {
+        Hardware {
+            os: "browser".to_owned(),
+            arch: std::env::consts::ARCH.to_owned(),
+            cpu_threads: std::thread::available_parallelism().ok().map(|n| n.get()),
+            ..Hardware::default()
+        }
+    }
+
+    pub fn detect_in(_game_dir: &std::path::Path) -> Hardware {
+        Hardware::detect()
+    }
+}
+
+/// The browser doesn't say whether the machine runs on battery.
+#[cfg(target_arch = "wasm32")]
+pub fn power_source() -> Option<&'static str> {
+    None
+}
+
+/// The process probes, which the browser doesn't have.
+#[cfg(target_arch = "wasm32")]
+pub mod process {
+    pub fn cpu_seconds(_pid: u32) -> Option<f64> {
+        None
+    }
+    pub fn load_average() -> Option<f64> {
+        None
+    }
+    pub fn rss_bytes(_pid: u32) -> Option<u64> {
+        None
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 /// What `horizon_system::Machine` reads.
 struct Probes {

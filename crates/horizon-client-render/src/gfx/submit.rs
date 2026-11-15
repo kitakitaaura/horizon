@@ -24,7 +24,7 @@ pub fn wanted() -> bool {
 }
 
 /// Work to start right after a frame's submission (a readback's `map_async`).
-pub type AfterSubmit = Box<dyn FnOnce() + Send>;
+pub use crate::gpu_thread::AfterSubmit;
 
 /// A frame for the submit thread: its commands and, in a window, the surface to present.
 pub struct Job {
@@ -72,23 +72,21 @@ impl Queue {
         let (jobs, job_rx) = mpsc::channel::<Job>();
         let (done_tx, done) = mpsc::channel();
         let queue = this.queue.clone();
-        let spawned = std::thread::Builder::new()
-            .name("Render submit".into())
-            .spawn(move || {
-                for job in job_rx {
-                    let commands = job.encoder.finish();
-                    let submission = queue.submit([commands]);
-                    if let Some(after) = job.after {
-                        after();
-                    }
-                    if let Some(surface) = job.surface {
-                        queue.present(surface);
-                    }
-                    if done_tx.send(submission).is_err() {
-                        break;
-                    }
+        let spawned = crate::gpu_thread::spawn("Render submit", move || {
+            for job in job_rx {
+                let commands = job.encoder.finish();
+                let submission = queue.submit([commands]);
+                if let Some(after) = job.after {
+                    after();
                 }
-            });
+                if let Some(surface) = job.surface {
+                    queue.present(surface);
+                }
+                if done_tx.send(submission).is_err() {
+                    break;
+                }
+            }
+        });
         match spawned {
             Ok(handle) => {
                 this.thread = Some(Thread {

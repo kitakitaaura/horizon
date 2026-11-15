@@ -378,7 +378,7 @@ impl NativeEntity {
             entities: pipeline("horizon_entity_vs", None),
             retained: pipeline("horizon_entity_vs_static", Some(retained)),
         };
-        if let Some(e) = pollster::block_on(scope.pop()) {
+        if let Some(e) = crate::gpu_thread::pop_now(scope) {
             return Err(format!("{}: {e}", stage.file));
         }
         Ok(built)

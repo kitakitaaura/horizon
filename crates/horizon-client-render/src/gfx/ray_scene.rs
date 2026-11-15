@@ -1101,7 +1101,7 @@ fn out_of_memory_free<T>(device: &wgpu::Device, make: impl FnOnce() -> T) -> Opt
     let scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
     let made = make();
     // Native error scopes resolve at once.
-    pollster::block_on(scope.pop()).is_none().then_some(made)
+    crate::gpu_thread::pop_now(scope).is_none().then_some(made)
 }
 
 fn create_tlas(device: &wgpu::Device, capacity: u32) -> wgpu::Tlas {

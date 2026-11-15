@@ -1,0 +1,1581 @@
+diff --git a/std/src/sys/args/mod.rs b/std/src/sys/args/mod.rs
+index c8011a6..40db2ca 100644
+--- a/std/src/sys/args/mod.rs
++++ b/std/src/sys/args/mod.rs
+@@ -10,6 +10,7 @@
+     target_os = "uefi",
+     target_os = "wasi",
+     target_os = "xous",
++    all(target_family = "wasm", target_os = "unknown", target_feature = "atomics"),
+ ))]
+ mod common;
+ 
+@@ -64,6 +65,11 @@ cfg_select! {
+         mod zkvm;
+         pub use zkvm::*;
+     }
++    all(target_family = "wasm", target_os = "unknown", target_feature = "atomics") => {
++        // Horizon's browser platform: arguments the page sets.
++        mod web;
++        pub use web::*;
++    }
+     _ => {
+         mod unsupported;
+         pub use unsupported::*;
+diff --git a/std/src/sys/args/web.rs b/std/src/sys/args/web.rs
+new file mode 100644
+index 0000000..b91c2eb
+--- /dev/null
++++ b/std/src/sys/args/web.rs
+@@ -0,0 +1,23 @@
++//! The program's arguments in the browser: what the page set before starting it
++//! (`__horizon_web_args_push`), after the program's own name.
++
++pub use super::common::Args;
++use crate::ffi::OsString;
++use crate::sync::Mutex;
++
++static ARGS: Mutex<Vec<OsString>> = Mutex::new(Vec::new());
++
++pub fn args() -> Args {
++    let mut all = vec![OsString::from("horizon")];
++    all.extend(ARGS.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned());
++    Args::new(all)
++}
++
++/// Appends one argument (UTF-8 bytes) for the next `std::env::args()`.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __horizon_web_args_push(ptr: *const u8, len: usize) {
++    // SAFETY: the caller passes `len` readable bytes.
++    let bytes = unsafe { crate::slice::from_raw_parts(ptr, len) };
++    let arg = OsString::from(crate::string::String::from_utf8_lossy(bytes).into_owned());
++    ARGS.lock().unwrap_or_else(|e| e.into_inner()).push(arg);
++}
+diff --git a/std/src/sys/env/mod.rs b/std/src/sys/env/mod.rs
+index 8985651..7d08572 100644
+--- a/std/src/sys/env/mod.rs
++++ b/std/src/sys/env/mod.rs
+@@ -55,6 +55,11 @@ cfg_select! {
+         mod zkvm;
+         pub use zkvm::*;
+     }
++    all(target_family = "wasm", target_os = "unknown", target_feature = "atomics") => {
++        // Horizon's browser platform: variables in memory.
++        mod web;
++        pub use web::*;
++    }
+     _ => {
+         mod unsupported;
+         pub use unsupported::*;
+diff --git a/std/src/sys/env/web.rs b/std/src/sys/env/web.rs
+new file mode 100644
+index 0000000..3ca44fb
+--- /dev/null
++++ b/std/src/sys/env/web.rs
+@@ -0,0 +1,49 @@
++//! Environment variables in the browser: a map in memory, shared by every thread, that the page
++//! may fill before the program starts.
++
++use crate::collections::BTreeMap;
++use crate::ffi::{OsStr, OsString};
++use crate::sync::Mutex;
++use crate::{fmt, io, vec};
++
++static VARS: Mutex<BTreeMap<OsString, OsString>> = Mutex::new(BTreeMap::new());
++
++fn vars() -> crate::sync::MutexGuard<'static, BTreeMap<OsString, OsString>> {
++    VARS.lock().unwrap_or_else(|e| e.into_inner())
++}
++
++pub struct Env {
++    iter: vec::IntoIter<(OsString, OsString)>,
++}
++
++impl fmt::Debug for Env {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_list().entries(self.iter.as_slice()).finish()
++    }
++}
++
++impl Iterator for Env {
++    type Item = (OsString, OsString);
++    fn next(&mut self) -> Option<(OsString, OsString)> {
++        self.iter.next()
++    }
++}
++
++pub fn env() -> Env {
++    let snapshot: Vec<_> = vars().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
++    Env { iter: snapshot.into_iter() }
++}
++
++pub fn getenv(key: &OsStr) -> Option<OsString> {
++    vars().get(key).cloned()
++}
++
++pub unsafe fn setenv(key: &OsStr, value: &OsStr) -> io::Result<()> {
++    vars().insert(key.to_owned(), value.to_owned());
++    Ok(())
++}
++
++pub unsafe fn unsetenv(key: &OsStr) -> io::Result<()> {
++    vars().remove(key);
++    Ok(())
++}
+diff --git a/std/src/sys/fs/mod.rs b/std/src/sys/fs/mod.rs
+index e15841b..89c0d5a 100644
+--- a/std/src/sys/fs/mod.rs
++++ b/std/src/sys/fs/mod.rs
+@@ -47,6 +47,12 @@ cfg_select! {
+         mod vexos;
+         use vexos as imp;
+     }
++    all(target_family = "wasm", target_os = "unknown", target_feature = "atomics") => {
++        // Horizon's browser platform: a filesystem in shared memory.
++        mod web;
++        use web as imp;
++        pub use web::absolute_web;
++    }
+     _ => {
+         mod unsupported;
+         use unsupported as imp;
+diff --git a/std/src/sys/fs/web.rs b/std/src/sys/fs/web.rs
+new file mode 100644
+index 0000000..f3f560f
+--- /dev/null
++++ b/std/src/sys/fs/web.rs
+@@ -0,0 +1,878 @@
++//! The filesystem in the browser: a tree in the module's shared memory, so every thread sees the
++//! same files. The tree's shape (names, directories) is behind one lock that operations hold
++//! briefly; each file's bytes have their own lock, so an open file keeps working after it was
++//! renamed or removed, as on Unix. Nothing here survives the page: the program copies what it
++//! keeps (saves, options) to the browser's storage itself.
++//!
++//! No symbolic links. Hard links share the file's bytes.
++
++use crate::collections::BTreeMap;
++use crate::ffi::OsString;
++use crate::fmt;
++use crate::fs::TryLockError;
++use crate::hash::Hash;
++use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, SeekFrom};
++use crate::path::{Component, Path, PathBuf};
++use crate::sync::atomic::{AtomicU64, Ordering};
++use crate::sync::{Arc, Mutex, RwLock};
++pub use crate::sys::fs::common::{Dir, ExtraHomeDirs, ExtraMediaDirs};
++use crate::sys::time::{SystemTime, UNIX_EPOCH};
++use crate::vec;
++
++macro_rules! fs_error {
++    ($kind:ident, $msg:literal) => {
++        io::const_error!(io::ErrorKind::$kind, $msg)
++    };
++}
++
++#[derive(Clone, Copy)]
++struct Times {
++    modified: SystemTime,
++    accessed: SystemTime,
++    created: SystemTime,
++}
++
++impl Times {
++    fn now() -> Times {
++        let now = SystemTime::now();
++        Times { modified: now, accessed: now, created: now }
++    }
++}
++
++struct FileNode {
++    data: RwLock<Vec<u8>>,
++    times: Mutex<Times>,
++    readonly: crate::sync::atomic::AtomicBool,
++}
++
++impl FileNode {
++    fn new(data: Vec<u8>) -> Arc<FileNode> {
++        Arc::new(FileNode {
++            data: RwLock::new(data),
++            times: Mutex::new(Times::now()),
++            readonly: crate::sync::atomic::AtomicBool::new(false),
++        })
++    }
++    fn attr(&self) -> FileAttr {
++        let size = self.data.read().unwrap_or_else(|e| e.into_inner()).len() as u64;
++        let times = *self.times.lock().unwrap_or_else(|e| e.into_inner());
++        FileAttr {
++            kind: FileType(Kind::File),
++            size,
++            times,
++            readonly: self.readonly.load(Ordering::Relaxed),
++        }
++    }
++    fn touch(&self) {
++        self.times.lock().unwrap_or_else(|e| e.into_inner()).modified = SystemTime::now();
++    }
++}
++
++struct DirNode {
++    entries: BTreeMap<OsString, Node>,
++    times: Times,
++}
++
++impl DirNode {
++    const fn empty() -> DirNode {
++        DirNode {
++            entries: BTreeMap::new(),
++            times: Times { modified: UNIX_EPOCH, accessed: UNIX_EPOCH, created: UNIX_EPOCH },
++        }
++    }
++    fn new() -> DirNode {
++        DirNode { entries: BTreeMap::new(), times: Times::now() }
++    }
++    fn attr(&self) -> FileAttr {
++        FileAttr { kind: FileType(Kind::Dir), size: 0, times: self.times, readonly: false }
++    }
++}
++
++enum Node {
++    Dir(DirNode),
++    File(Arc<FileNode>),
++}
++
++impl Node {
++    fn attr(&self) -> FileAttr {
++        match self {
++            Node::Dir(d) => d.attr(),
++            Node::File(f) => f.attr(),
++        }
++    }
++}
++
++static ROOT: RwLock<DirNode> = RwLock::new(DirNode::empty());
++
++fn read_root() -> crate::sync::RwLockReadGuard<'static, DirNode> {
++    ROOT.read().unwrap_or_else(|e| e.into_inner())
++}
++
++fn write_root() -> crate::sync::RwLockWriteGuard<'static, DirNode> {
++    ROOT.write().unwrap_or_else(|e| e.into_inner())
++}
++
++/// `path`'s names from the root: relative paths start at the working directory, `.` is
++/// dropped and `..` goes up (never above the root).
++fn names(path: &Path) -> io::Result<Vec<OsString>> {
++    let mut names = Vec::new();
++    if !path.has_root() {
++        for c in crate::sys::paths::getcwd()?.components() {
++            if let Component::Normal(name) = c {
++                names.push(name.to_owned());
++            }
++        }
++    }
++    for c in path.components() {
++        match c {
++            Component::RootDir => names.clear(),
++            Component::CurDir | Component::Prefix(_) => {}
++            Component::ParentDir => {
++                names.pop();
++            }
++            Component::Normal(name) => names.push(name.to_owned()),
++        }
++    }
++    Ok(names)
++}
++
++fn to_path(names: &[OsString]) -> PathBuf {
++    let mut path = PathBuf::from("/");
++    for name in names {
++        path.push(name);
++    }
++    path
++}
++
++/// `path` made absolute with its `.` and `..` resolved.
++pub fn absolute_web(path: &Path) -> io::Result<PathBuf> {
++    Ok(to_path(&names(path)?))
++}
++
++fn find<'a>(root: &'a DirNode, names: &[OsString]) -> io::Result<&'a Node> {
++    let (last, parents) = match names.split_last() {
++        Some(split) => split,
++        None => return Err(fs_error!(InvalidInput, "the root has no node of its own")),
++    };
++    let dir = find_dir(root, parents)?;
++    dir.entries.get(last).ok_or(fs_error!(NotFound, "no such file or directory"))
++}
++
++fn find_dir<'a>(root: &'a DirNode, names: &[OsString]) -> io::Result<&'a DirNode> {
++    let mut dir = root;
++    for name in names {
++        match dir.entries.get(name) {
++            Some(Node::Dir(d)) => dir = d,
++            Some(Node::File(_)) => return Err(fs_error!(NotADirectory, "not a directory")),
++            None => return Err(fs_error!(NotFound, "no such file or directory")),
++        }
++    }
++    Ok(dir)
++}
++
++fn find_dir_mut<'a>(root: &'a mut DirNode, names: &[OsString]) -> io::Result<&'a mut DirNode> {
++    let mut dir = root;
++    for name in names {
++        match dir.entries.get_mut(name) {
++            Some(Node::Dir(d)) => dir = d,
++            Some(Node::File(_)) => return Err(fs_error!(NotADirectory, "not a directory")),
++            None => return Err(fs_error!(NotFound, "no such file or directory")),
++        }
++    }
++    Ok(dir)
++}
++
++fn stat_names(names: &[OsString]) -> io::Result<FileAttr> {
++    let root = read_root();
++    if names.is_empty() {
++        return Ok(root.attr());
++    }
++    Ok(find(&root, names)?.attr())
++}
++
++#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
++enum Kind {
++    File,
++    Dir,
++}
++
++#[derive(Clone)]
++pub struct FileAttr {
++    kind: FileType,
++    size: u64,
++    times: Times,
++    readonly: bool,
++}
++
++#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
++pub struct FileType(Kind);
++
++#[derive(Clone, PartialEq, Eq, Debug)]
++pub struct FilePermissions {
++    readonly: bool,
++}
++
++#[derive(Copy, Clone, Debug, Default)]
++pub struct FileTimes {
++    accessed: Option<SystemTime>,
++    modified: Option<SystemTime>,
++}
++
++#[derive(Clone, Debug)]
++pub struct OpenOptions {
++    read: bool,
++    write: bool,
++    append: bool,
++    truncate: bool,
++    create: bool,
++    create_new: bool,
++}
++
++#[derive(Debug)]
++pub struct DirBuilder {}
++
++enum Handle {
++    File(Arc<FileNode>),
++    Dir(Vec<OsString>),
++}
++
++pub struct File {
++    handle: Handle,
++    /// Shared with the handle's duplicates, as an `fd`'s offset is.
++    pos: Arc<AtomicU64>,
++    read: bool,
++    write: bool,
++    append: bool,
++}
++
++pub struct ReadDir {
++    root: PathBuf,
++    entries: vec::IntoIter<DirEntry>,
++}
++
++pub struct DirEntry {
++    root: PathBuf,
++    name: OsString,
++    attr: FileAttr,
++}
++
++impl FileAttr {
++    pub fn size(&self) -> u64 {
++        self.size
++    }
++
++    pub fn perm(&self) -> FilePermissions {
++        FilePermissions { readonly: self.readonly }
++    }
++
++    pub fn file_type(&self) -> FileType {
++        self.kind
++    }
++
++    pub fn modified(&self) -> io::Result<SystemTime> {
++        Ok(self.times.modified)
++    }
++
++    pub fn accessed(&self) -> io::Result<SystemTime> {
++        Ok(self.times.accessed)
++    }
++
++    pub fn created(&self) -> io::Result<SystemTime> {
++        Ok(self.times.created)
++    }
++}
++
++impl FilePermissions {
++    pub fn readonly(&self) -> bool {
++        self.readonly
++    }
++
++    pub fn set_readonly(&mut self, readonly: bool) {
++        self.readonly = readonly;
++    }
++}
++
++impl FileTimes {
++    pub fn set_accessed(&mut self, t: SystemTime) {
++        self.accessed = Some(t);
++    }
++    pub fn set_modified(&mut self, t: SystemTime) {
++        self.modified = Some(t);
++    }
++}
++
++impl FileType {
++    pub fn is_dir(&self) -> bool {
++        self.0 == Kind::Dir
++    }
++
++    pub fn is_file(&self) -> bool {
++        self.0 == Kind::File
++    }
++
++    pub fn is_symlink(&self) -> bool {
++        false
++    }
++}
++
++impl ReadDir {
++    pub fn dir(&self) -> io::Result<Dir> {
++        Dir::open_for_traversal(&self.root)
++    }
++}
++
++impl fmt::Debug for ReadDir {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_tuple("ReadDir").field(&self.root).finish()
++    }
++}
++
++impl Iterator for ReadDir {
++    type Item = io::Result<DirEntry>;
++
++    fn next(&mut self) -> Option<io::Result<DirEntry>> {
++        self.entries.next().map(Ok)
++    }
++}
++
++impl DirEntry {
++    pub fn path(&self) -> PathBuf {
++        self.root.join(&self.name)
++    }
++
++    pub fn file_name(&self) -> OsString {
++        self.name.clone()
++    }
++
++    pub fn metadata(&self) -> io::Result<FileAttr> {
++        Ok(self.attr.clone())
++    }
++
++    pub fn file_type(&self) -> io::Result<FileType> {
++        Ok(self.attr.kind)
++    }
++}
++
++impl OpenOptions {
++    pub fn new() -> OpenOptions {
++        OpenOptions {
++            read: false,
++            write: false,
++            append: false,
++            truncate: false,
++            create: false,
++            create_new: false,
++        }
++    }
++
++    pub fn read(&mut self, read: bool) {
++        self.read = read;
++    }
++    pub fn write(&mut self, write: bool) {
++        self.write = write;
++    }
++    pub fn append(&mut self, append: bool) {
++        self.append = append;
++    }
++    pub fn truncate(&mut self, truncate: bool) {
++        self.truncate = truncate;
++    }
++    pub fn create(&mut self, create: bool) {
++        self.create = create;
++    }
++    pub fn create_new(&mut self, create_new: bool) {
++        self.create_new = create_new;
++    }
++}
++
++impl File {
++    pub fn open(path: &Path, opts: &OpenOptions) -> io::Result<File> {
++        let names = names(path)?;
++        let writes = opts.write || opts.append;
++        let creates = opts.create || opts.create_new;
++        if creates && !writes {
++            return Err(fs_error!(InvalidInput, "creating a file needs write or append"));
++        }
++        let handle = if names.is_empty() {
++            if writes {
++                return Err(fs_error!(IsADirectory, "is a directory"));
++            }
++            Handle::Dir(names)
++        } else {
++            let (last, parents) = names.split_last().unwrap();
++            let existing = {
++                let root = read_root();
++                match find_dir(&root, parents)?.entries.get(last) {
++                    Some(Node::File(f)) => Some(Handle::File(f.clone())),
++                    Some(Node::Dir(_)) => Some(Handle::Dir(names.clone())),
++                    None => None,
++                }
++            };
++            match existing {
++                Some(_) if opts.create_new => {
++                    return Err(fs_error!(AlreadyExists, "file exists"));
++                }
++                Some(Handle::Dir(_)) if writes => {
++                    return Err(fs_error!(IsADirectory, "is a directory"));
++                }
++                Some(handle) => handle,
++                None if creates => {
++                    let mut root = write_root();
++                    let dir = find_dir_mut(&mut root, parents)?;
++                    // Another thread may have made it since the read lock was let go.
++                    match dir.entries.get(last) {
++                        Some(Node::File(f)) if !opts.create_new => Handle::File(f.clone()),
++                        Some(Node::File(_)) => {
++                            return Err(fs_error!(AlreadyExists, "file exists"));
++                        }
++                        Some(Node::Dir(_)) => {
++                            return Err(fs_error!(IsADirectory, "is a directory"));
++                        }
++                        None => {
++                            let node = FileNode::new(Vec::new());
++                            dir.entries.insert(last.clone(), Node::File(node.clone()));
++                            dir.times.modified = SystemTime::now();
++                            Handle::File(node)
++                        }
++                    }
++                }
++                None => return Err(fs_error!(NotFound, "no such file or directory")),
++            }
++        };
++        if let Handle::File(node) = &handle {
++            if writes && node.readonly.load(Ordering::Relaxed) {
++                return Err(fs_error!(PermissionDenied, "read-only file"));
++            }
++            if opts.truncate && writes {
++                node.data.write().unwrap_or_else(|e| e.into_inner()).clear();
++                node.touch();
++            }
++        }
++        Ok(File {
++            handle,
++            pos: Arc::new(AtomicU64::new(0)),
++            read: opts.read || !writes,
++            write: writes,
++            append: opts.append,
++        })
++    }
++
++    fn node(&self) -> io::Result<&Arc<FileNode>> {
++        match &self.handle {
++            Handle::File(node) => Ok(node),
++            Handle::Dir(_) => Err(fs_error!(IsADirectory, "is a directory")),
++        }
++    }
++
++    pub fn file_attr(&self) -> io::Result<FileAttr> {
++        match &self.handle {
++            Handle::File(node) => Ok(node.attr()),
++            Handle::Dir(names) => stat_names(names),
++        }
++    }
++
++    pub fn fsync(&self) -> io::Result<()> {
++        Ok(())
++    }
++
++    pub fn datasync(&self) -> io::Result<()> {
++        Ok(())
++    }
++
++    pub fn lock(&self) -> io::Result<()> {
++        Ok(())
++    }
++
++    pub fn lock_shared(&self) -> io::Result<()> {
++        Ok(())
++    }
++
++    pub fn try_lock(&self) -> Result<(), TryLockError> {
++        Ok(())
++    }
++
++    pub fn try_lock_shared(&self) -> Result<(), TryLockError> {
++        Ok(())
++    }
++
++    pub fn unlock(&self) -> io::Result<()> {
++        Ok(())
++    }
++
++    pub fn truncate(&self, size: u64) -> io::Result<()> {
++        if !self.write {
++            return Err(fs_error!(InvalidInput, "file not opened for writing"));
++        }
++        let node = self.node()?;
++        let size = usize::try_from(size).map_err(|_| fs_error!(FileTooLarge, "file too large"))?;
++        node.data.write().unwrap_or_else(|e| e.into_inner()).resize(size, 0);
++        node.touch();
++        Ok(())
++    }
++
++    pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
++        if !self.read {
++            return Err(fs_error!(InvalidInput, "file not opened for reading"));
++        }
++        let data = self.node()?.data.read().unwrap_or_else(|e| e.into_inner());
++        let pos = self.pos.load(Ordering::Acquire);
++        let start = (pos as usize).min(data.len());
++        let n = buf.len().min(data.len() - start);
++        buf[..n].copy_from_slice(&data[start..start + n]);
++        self.pos.store(pos + n as u64, Ordering::Release);
++        Ok(n)
++    }
++
++    pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
++        crate::io::default_read_vectored(|b| self.read(b), bufs)
++    }
++
++    pub fn is_read_vectored(&self) -> bool {
++        false
++    }
++
++    pub fn read_buf(&self, mut cursor: BorrowedCursor<'_, u8>) -> io::Result<()> {
++        if !self.read {
++            return Err(fs_error!(InvalidInput, "file not opened for reading"));
++        }
++        let data = self.node()?.data.read().unwrap_or_else(|e| e.into_inner());
++        let pos = self.pos.load(Ordering::Acquire);
++        let start = (pos as usize).min(data.len());
++        let n = cursor.capacity().min(data.len() - start);
++        cursor.append(&data[start..start + n]);
++        self.pos.store(pos + n as u64, Ordering::Release);
++        Ok(())
++    }
++
++    pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
++        if !self.write {
++            return Err(fs_error!(InvalidInput, "file not opened for writing"));
++        }
++        let node = self.node()?;
++        let mut data = node.data.write().unwrap_or_else(|e| e.into_inner());
++        let pos = if self.append { data.len() } else { self.pos.load(Ordering::Acquire) as usize };
++        let end = pos + buf.len();
++        if data.len() < end {
++            data.resize(end, 0);
++        }
++        data[pos..end].copy_from_slice(buf);
++        self.pos.store(end as u64, Ordering::Release);
++        drop(data);
++        node.touch();
++        Ok(buf.len())
++    }
++
++    pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
++        crate::io::default_write_vectored(|b| self.write(b), bufs)
++    }
++
++    pub fn is_write_vectored(&self) -> bool {
++        false
++    }
++
++    pub fn flush(&self) -> io::Result<()> {
++        Ok(())
++    }
++
++    pub fn seek(&self, pos: SeekFrom) -> io::Result<u64> {
++        let len = match &self.handle {
++            Handle::File(node) => node.data.read().unwrap_or_else(|e| e.into_inner()).len() as i128,
++            Handle::Dir(_) => 0,
++        };
++        let new = match pos {
++            SeekFrom::Start(n) => n as i128,
++            SeekFrom::End(n) => len + n as i128,
++            SeekFrom::Current(n) => self.pos.load(Ordering::Acquire) as i128 + n as i128,
++        };
++        let new = u64::try_from(new)
++            .map_err(|_| fs_error!(InvalidInput, "seek to a negative or overflowing position"))?;
++        self.pos.store(new, Ordering::Release);
++        Ok(new)
++    }
++
++    pub fn size(&self) -> Option<io::Result<u64>> {
++        Some(self.file_attr().map(|a| a.size))
++    }
++
++    pub fn tell(&self) -> io::Result<u64> {
++        Ok(self.pos.load(Ordering::Acquire))
++    }
++
++    pub fn duplicate(&self) -> io::Result<File> {
++        let handle = match &self.handle {
++            Handle::File(node) => Handle::File(node.clone()),
++            Handle::Dir(names) => Handle::Dir(names.clone()),
++        };
++        Ok(File {
++            handle,
++            pos: self.pos.clone(),
++            read: self.read,
++            write: self.write,
++            append: self.append,
++        })
++    }
++
++    pub fn set_permissions(&self, perm: FilePermissions) -> io::Result<()> {
++        if let Handle::File(node) = &self.handle {
++            node.readonly.store(perm.readonly, Ordering::Relaxed);
++        }
++        Ok(())
++    }
++
++    pub fn set_times(&self, times: FileTimes) -> io::Result<()> {
++        if let Handle::File(node) = &self.handle {
++            let mut t = node.times.lock().unwrap_or_else(|e| e.into_inner());
++            if let Some(a) = times.accessed {
++                t.accessed = a;
++            }
++            if let Some(m) = times.modified {
++                t.modified = m;
++            }
++        }
++        Ok(())
++    }
++}
++
++impl DirBuilder {
++    pub fn new() -> DirBuilder {
++        DirBuilder {}
++    }
++
++    pub fn mkdir(&self, p: &Path) -> io::Result<()> {
++        let names = names(p)?;
++        let Some((last, parents)) = names.split_last() else {
++            return Err(fs_error!(AlreadyExists, "the root exists"));
++        };
++        let mut root = write_root();
++        let dir = find_dir_mut(&mut root, parents)?;
++        if dir.entries.contains_key(last) {
++            return Err(fs_error!(AlreadyExists, "file exists"));
++        }
++        dir.entries.insert(last.clone(), Node::Dir(DirNode::new()));
++        dir.times.modified = SystemTime::now();
++        Ok(())
++    }
++}
++
++impl fmt::Debug for File {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        let kind = match self.handle {
++            Handle::File(_) => "file",
++            Handle::Dir(_) => "dir",
++        };
++        f.debug_struct("File").field("kind", &kind).field("pos", &self.pos).finish()
++    }
++}
++
++pub fn readdir(p: &Path) -> io::Result<ReadDir> {
++    let names = names(p)?;
++    let root = read_root();
++    let dir = find_dir(&root, &names)?;
++    let entries: Vec<DirEntry> = dir
++        .entries
++        .iter()
++        .map(|(name, node)| DirEntry { root: p.to_owned(), name: name.clone(), attr: node.attr() })
++        .collect();
++    Ok(ReadDir { root: p.to_owned(), entries: entries.into_iter() })
++}
++
++/// Takes `names`'s node out of its directory when `check` allows it.
++fn take(names: &[OsString], check: impl FnOnce(&Node) -> io::Result<()>) -> io::Result<Node> {
++    let Some((last, parents)) = names.split_last() else {
++        return Err(fs_error!(PermissionDenied, "the root can't be removed"));
++    };
++    let mut root = write_root();
++    let dir = find_dir_mut(&mut root, parents)?;
++    check(dir.entries.get(last).ok_or(fs_error!(NotFound, "no such file or directory"))?)?;
++    dir.times.modified = SystemTime::now();
++    Ok(dir.entries.remove(last).unwrap())
++}
++
++pub fn unlink(p: &Path) -> io::Result<()> {
++    take(&names(p)?, |node| match node {
++        Node::File(_) => Ok(()),
++        Node::Dir(_) => Err(fs_error!(IsADirectory, "is a directory")),
++    })
++    .map(drop)
++}
++
++fn rename_with(old: &Path, new: &Path, replace: bool) -> io::Result<()> {
++    let (old, new) = (names(old)?, names(new)?);
++    if old == new {
++        return stat_names(&old).map(drop);
++    }
++    if new.starts_with(&old) {
++        return Err(fs_error!(InvalidInput, "can't move a directory into itself"));
++    }
++    let (Some((old_last, old_parents)), Some((new_last, new_parents))) =
++        (old.split_last(), new.split_last())
++    else {
++        return Err(fs_error!(InvalidInput, "can't rename the root"));
++    };
++    let mut root = write_root();
++    // Check both ends before changing anything.
++    let moving_dir = match find_dir(&root, old_parents)?.entries.get(old_last) {
++        Some(node) => matches!(node, Node::Dir(_)),
++        None => return Err(fs_error!(NotFound, "no such file or directory")),
++    };
++    match find_dir(&root, new_parents)?.entries.get(new_last) {
++        Some(_) if !replace => return Err(fs_error!(AlreadyExists, "file exists")),
++        Some(Node::Dir(_)) if !moving_dir => {
++            return Err(fs_error!(IsADirectory, "is a directory"));
++        }
++        Some(Node::Dir(d)) if !d.entries.is_empty() => {
++            return Err(fs_error!(DirectoryNotEmpty, "directory not empty"));
++        }
++        Some(Node::File(_)) if moving_dir => {
++            return Err(fs_error!(NotADirectory, "not a directory"));
++        }
++        _ => {}
++    }
++    let now = SystemTime::now();
++    let from = find_dir_mut(&mut root, old_parents)?;
++    let node = from.entries.remove(old_last).unwrap();
++    from.times.modified = now;
++    let to = find_dir_mut(&mut root, new_parents)?;
++    to.entries.insert(new_last.clone(), node);
++    to.times.modified = now;
++    Ok(())
++}
++
++pub fn rename(old: &Path, new: &Path) -> io::Result<()> {
++    rename_with(old, new, true)
++}
++
++pub fn rename_noreplace(old: &Path, new: &Path) -> io::Result<()> {
++    rename_with(old, new, false)
++}
++
++pub fn set_perm(p: &Path, perm: FilePermissions) -> io::Result<()> {
++    let names = names(p)?;
++    let root = read_root();
++    if let Node::File(node) = find(&root, &names)? {
++        node.readonly.store(perm.readonly, Ordering::Relaxed);
++    }
++    Ok(())
++}
++
++pub fn set_perm_nofollow(p: &Path, perm: FilePermissions) -> io::Result<()> {
++    set_perm(p, perm)
++}
++
++pub fn set_times(p: &Path, times: FileTimes) -> io::Result<()> {
++    let names = names(p)?;
++    let mut root = write_root();
++    let Some((last, parents)) = names.split_last() else {
++        return Ok(());
++    };
++    match find_dir_mut(&mut root, parents)?.entries.get_mut(last) {
++        Some(Node::File(node)) => {
++            let mut t = node.times.lock().unwrap_or_else(|e| e.into_inner());
++            if let Some(a) = times.accessed {
++                t.accessed = a;
++            }
++            if let Some(m) = times.modified {
++                t.modified = m;
++            }
++        }
++        Some(Node::Dir(dir)) => {
++            if let Some(a) = times.accessed {
++                dir.times.accessed = a;
++            }
++            if let Some(m) = times.modified {
++                dir.times.modified = m;
++            }
++        }
++        None => return Err(fs_error!(NotFound, "no such file or directory")),
++    }
++    Ok(())
++}
++
++pub fn set_times_nofollow(p: &Path, times: FileTimes) -> io::Result<()> {
++    set_times(p, times)
++}
++
++pub fn rmdir(p: &Path) -> io::Result<()> {
++    take(&names(p)?, |node| match node {
++        Node::Dir(d) if d.entries.is_empty() => Ok(()),
++        Node::Dir(_) => Err(fs_error!(DirectoryNotEmpty, "directory not empty")),
++        Node::File(_) => Err(fs_error!(NotADirectory, "not a directory")),
++    })
++    .map(drop)
++}
++
++pub fn remove_dir_all(path: &Path) -> io::Result<()> {
++    take(&names(path)?, |node| match node {
++        Node::Dir(_) => Ok(()),
++        Node::File(_) => Err(fs_error!(NotADirectory, "not a directory")),
++    })
++    .map(drop)
++}
++
++pub fn exists(path: &Path) -> io::Result<bool> {
++    match stat(path) {
++        Ok(_) => Ok(true),
++        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
++        Err(e) if e.kind() == io::ErrorKind::NotADirectory => Ok(false),
++        Err(e) => Err(e),
++    }
++}
++
++pub fn readlink(_p: &Path) -> io::Result<PathBuf> {
++    Err(fs_error!(InvalidInput, "not a symbolic link"))
++}
++
++pub fn symlink(_original: &Path, _link: &Path) -> io::Result<()> {
++    Err(fs_error!(Unsupported, "no symbolic links in the browser's filesystem"))
++}
++
++pub fn link(src: &Path, dst: &Path) -> io::Result<()> {
++    let (src, dst) = (names(src)?, names(dst)?);
++    let Some((last, parents)) = dst.split_last() else {
++        return Err(fs_error!(AlreadyExists, "the root exists"));
++    };
++    let mut root = write_root();
++    let node = match find(&root, &src)? {
++        Node::File(node) => node.clone(),
++        Node::Dir(_) => return Err(fs_error!(PermissionDenied, "can't hard-link a directory")),
++    };
++    let dir = find_dir_mut(&mut root, parents)?;
++    if dir.entries.contains_key(last) {
++        return Err(fs_error!(AlreadyExists, "file exists"));
++    }
++    dir.entries.insert(last.clone(), Node::File(node));
++    Ok(())
++}
++
++pub fn stat(p: &Path) -> io::Result<FileAttr> {
++    stat_names(&names(p)?)
++}
++
++pub fn lstat(p: &Path) -> io::Result<FileAttr> {
++    stat(p)
++}
++
++pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {
++    let names = names(p)?;
++    stat_names(&names)?;
++    Ok(to_path(&names))
++}
++
++pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
++    let data = {
++        let names = names(from)?;
++        let root = read_root();
++        match find(&root, &names)? {
++            Node::File(node) => node.data.read().unwrap_or_else(|e| e.into_inner()).clone(),
++            Node::Dir(_) => return Err(fs_error!(InvalidInput, "the source is a directory")),
++        }
++    };
++    let mut opts = OpenOptions::new();
++    opts.write(true);
++    opts.create(true);
++    opts.truncate(true);
++    let file = File::open(to, &opts)?;
++    let len = data.len() as u64;
++    *file.node()?.data.write().unwrap_or_else(|e| e.into_inner()) = data;
++    Ok(len)
++}
+diff --git a/std/src/sys/mod.rs b/std/src/sys/mod.rs
+index 58c8dc4..205a777 100644
+--- a/std/src/sys/mod.rs
++++ b/std/src/sys/mod.rs
+@@ -28,6 +28,9 @@ pub mod sync;
+ pub mod thread;
+ pub mod thread_local;
+ pub mod time;
++/// Horizon's browser platform: host hooks, the main thread's waits and the thread pool.
++#[cfg(all(target_family = "wasm", target_os = "unknown", target_feature = "atomics"))]
++pub mod web_host;
+ 
+ // FIXME(117276): remove this, move feature implementations into individual
+ //                submodules.
+diff --git a/std/src/sys/paths/mod.rs b/std/src/sys/paths/mod.rs
+index 865d06a..8e543dc 100644
+--- a/std/src/sys/paths/mod.rs
++++ b/std/src/sys/paths/mod.rs
+@@ -58,6 +58,11 @@ cfg_select! {
+         mod windows;
+         use windows as imp;
+     }
++    all(target_family = "wasm", target_os = "unknown", target_feature = "atomics") => {
++        // Horizon's browser platform: the in-memory filesystem's paths.
++        mod web;
++        use web as imp;
++    }
+     _ => {
+         mod unsupported;
+         use unsupported as imp;
+diff --git a/std/src/sys/paths/web.rs b/std/src/sys/paths/web.rs
+new file mode 100644
+index 0000000..dd584f0
+--- /dev/null
++++ b/std/src/sys/paths/web.rs
+@@ -0,0 +1,94 @@
++//! Paths in the browser: the in-memory filesystem's (sys/fs/web.rs), rooted at `/`, with a
++//! working directory every thread shares.
++
++use crate::ffi::{OsStr, OsString};
++use crate::path::{Path, PathBuf};
++use crate::sync::Mutex;
++use crate::{fmt, io};
++
++static CWD: Mutex<Option<PathBuf>> = Mutex::new(None);
++
++pub fn getcwd() -> io::Result<PathBuf> {
++    Ok(CWD.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(|| PathBuf::from("/")))
++}
++
++pub fn chdir(path: &Path) -> io::Result<()> {
++    let absolute = crate::sys::fs::absolute_web(path)?;
++    if !crate::sys::fs::metadata(&absolute)?.file_type().is_dir() {
++        return Err(io::const_error!(io::ErrorKind::NotADirectory, "not a directory"));
++    }
++    *CWD.lock().unwrap_or_else(|e| e.into_inner()) = Some(absolute);
++    Ok(())
++}
++
++pub struct SplitPaths<'a> {
++    iter: crate::str::Split<'a, char>,
++}
++
++pub fn split_paths(unparsed: &OsStr) -> SplitPaths<'_> {
++    SplitPaths { iter: unparsed.to_str().unwrap_or("").split(':') }
++}
++
++pub struct SplitPathsRef<'a> {
++    iter: crate::str::Split<'a, char>,
++}
++
++pub fn split_paths_ref(unparsed: &OsStr) -> Option<SplitPathsRef<'_>> {
++    Some(SplitPathsRef { iter: unparsed.to_str()?.split(':') })
++}
++
++impl<'a> Iterator for SplitPaths<'a> {
++    type Item = PathBuf;
++    fn next(&mut self) -> Option<PathBuf> {
++        self.iter.next().map(PathBuf::from)
++    }
++}
++
++impl<'a> Iterator for SplitPathsRef<'a> {
++    type Item = &'a Path;
++    fn next(&mut self) -> Option<&'a Path> {
++        self.iter.next().map(Path::new)
++    }
++}
++
++#[derive(Debug)]
++pub struct JoinPathsError;
++
++pub fn join_paths<I, T>(paths: I) -> Result<OsString, JoinPathsError>
++where
++    I: Iterator<Item = T>,
++    T: AsRef<OsStr>,
++{
++    let mut joined = OsString::new();
++    for (i, path) in paths.enumerate() {
++        let path = path.as_ref();
++        if path.to_str().map_or(true, |p| p.contains(':')) {
++            return Err(JoinPathsError);
++        }
++        if i > 0 {
++            joined.push(":");
++        }
++        joined.push(path);
++    }
++    Ok(joined)
++}
++
++impl fmt::Display for JoinPathsError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        "path contains a `:`".fmt(f)
++    }
++}
++
++impl crate::error::Error for JoinPathsError {}
++
++pub fn current_exe() -> io::Result<PathBuf> {
++    Ok(PathBuf::from("/horizon/horizon-client"))
++}
++
++pub fn temp_dir() -> PathBuf {
++    PathBuf::from("/tmp")
++}
++
++pub fn home_dir() -> Option<PathBuf> {
++    Some(PathBuf::from("/home"))
++}
+diff --git a/std/src/sys/process/unsupported.rs b/std/src/sys/process/unsupported.rs
+index f7d7f48..ef80046 100644
+--- a/std/src/sys/process/unsupported.rs
++++ b/std/src/sys/process/unsupported.rs
+@@ -332,5 +332,11 @@ pub fn read_output(
+ }
+ 
+ pub fn getpid() -> u32 {
+-    panic!("no pids on this platform")
++    // Horizon's browser platform: one process, the page.
++    #[cfg(all(target_family = "wasm", target_os = "unknown", target_feature = "atomics"))]
++    return 1;
++    #[allow(unreachable_code)]
++    {
++        panic!("no pids on this platform")
++    }
+ }
+diff --git a/std/src/sys/random/unsupported.rs b/std/src/sys/random/unsupported.rs
+index 894409b..990971a 100644
+--- a/std/src/sys/random/unsupported.rs
++++ b/std/src/sys/random/unsupported.rs
+@@ -1,7 +1,14 @@
+ use crate::ptr;
+ 
+-pub fn fill_bytes(_: &mut [u8]) {
+-    panic!("this target does not support random data generation");
++pub fn fill_bytes(bytes: &mut [u8]) {
++    // Horizon's browser platform: the page's crypto.getRandomValues.
++    #[cfg(all(target_family = "wasm", target_os = "unknown", target_feature = "atomics"))]
++    return crate::sys::web_host::random_fill(bytes);
++    #[allow(unreachable_code)]
++    {
++        let _ = bytes;
++        panic!("this target does not support random data generation");
++    }
+ }
+ 
+ pub fn hashmap_random_keys() -> (u64, u64) {
+diff --git a/std/src/sys/stdio/unsupported.rs b/std/src/sys/stdio/unsupported.rs
+index e35f779..c78116b 100644
+--- a/std/src/sys/stdio/unsupported.rs
++++ b/std/src/sys/stdio/unsupported.rs
+@@ -63,11 +63,18 @@ impl Stdout {
+ impl io::Write for Stdout {
+     #[inline]
+     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
++        // Horizon's browser platform: stdout and stderr go to the page's console.
++        #[cfg(all(target_family = "wasm", target_os = "unknown", target_feature = "atomics"))]
++        crate::sys::web_host::write_console(buf);
+         Ok(buf.len())
+     }
+ 
+     #[inline]
+     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
++        #[cfg(all(target_family = "wasm", target_os = "unknown", target_feature = "atomics"))]
++        for b in bufs {
++            crate::sys::web_host::write_console(b);
++        }
+         let total_len = bufs.iter().map(|b| b.len()).sum();
+         Ok(total_len)
+     }
+diff --git a/std/src/sys/sync/futex/wasm.rs b/std/src/sys/sync/futex/wasm.rs
+index 6676aa7..82e74b2 100644
+--- a/std/src/sys/sync/futex/wasm.rs
++++ b/std/src/sys/sync/futex/wasm.rs
+@@ -22,6 +22,11 @@ pub type SmallPrimitive = u32;
+ ///
+ /// Returns false on timeout, and true in all other cases.
+ pub fn futex_wait(futex: &Atomic<u32>, expected: u32, timeout: Option<Duration>) -> bool {
++    // The browser's main thread may not block (`memory.atomic.wait32` traps there): it spins.
++    #[cfg(target_os = "unknown")]
++    if !crate::sys::web_host::can_block() {
++        return crate::sys::web_host::spin_wait(futex, expected, timeout);
++    }
+     let timeout = timeout.and_then(|t| t.as_nanos().try_into().ok()).unwrap_or(-1);
+     unsafe {
+         wasm::memory_atomic_wait32(
+diff --git a/std/src/sys/sync/mod.rs b/std/src/sys/sync/mod.rs
+index ff675d2..f88dd6f 100644
+--- a/std/src/sys/sync/mod.rs
++++ b/std/src/sys/sync/mod.rs
+@@ -1,5 +1,5 @@
+ mod condvar;
+-mod futex;
++pub(crate) mod futex;
+ mod mutex;
+ mod once;
+ mod once_box;
+diff --git a/std/src/sys/thread/mod.rs b/std/src/sys/thread/mod.rs
+index dfbfc2b..90de1c0 100644
+--- a/std/src/sys/thread/mod.rs
++++ b/std/src/sys/thread/mod.rs
+@@ -100,6 +100,15 @@ cfg_select! {
+             DEFAULT_MIN_STACK_SIZE, Thread, available_parallelism, current_os_id, set_name,
+         };
+     }
++    all(target_family = "wasm", target_os = "unknown", target_feature = "atomics") => {
++        // Horizon's browser platform (sys/web_host.rs): threads on a pool of Web Workers.
++        mod wasm;
++        mod web;
++        pub use web::{
++            DEFAULT_MIN_STACK_SIZE, Thread, available_parallelism, current_os_id, set_name, sleep,
++            yield_now,
++        };
++    }
+     all(target_family = "wasm", target_feature = "atomics") => {
+         mod wasm;
+         pub use wasm::sleep;
+diff --git a/std/src/sys/thread/web.rs b/std/src/sys/thread/web.rs
+new file mode 100644
+index 0000000..cbc93b4
+--- /dev/null
++++ b/std/src/sys/thread/web.rs
+@@ -0,0 +1,67 @@
++//! Threads in the browser: each runs on a Web Worker from the page's pool (`sys::web_host`).
++
++use crate::ffi::CStr;
++use crate::io;
++use crate::num::NonZero;
++use crate::sync::Arc;
++use crate::sync::atomic::{AtomicU32, Ordering};
++use crate::sys::sync::futex::{futex_wait, futex_wake_all};
++use crate::sys::web_host;
++use crate::thread::ThreadInit;
++use crate::time::Duration;
++
++pub const DEFAULT_MIN_STACK_SIZE: usize = 2 * 1024 * 1024;
++
++pub struct Thread {
++    /// 1 once the thread's entry and its thread-local destructors have run.
++    done: Arc<AtomicU32>,
++}
++
++impl Thread {
++    // unsafe: see thread::Builder::spawn_unchecked for safety requirements
++    pub unsafe fn new(_stack: usize, init: Box<ThreadInit>) -> io::Result<Thread> {
++        // The stack is the worker's own, sized by the page when it started the worker.
++        let done = Arc::new(AtomicU32::new(0));
++        let finished = done.clone();
++        web_host::post(web_host::Job {
++            run: Box::new(move || {
++                let main = init.init();
++                main();
++                // SAFETY: the thread's code has returned; nothing borrows its thread-locals.
++                unsafe { crate::sys::thread_local::destructors::run() };
++                crate::rt::thread_cleanup();
++                finished.store(1, Ordering::Release);
++                futex_wake_all(&finished);
++            }),
++        });
++        Ok(Thread { done })
++    }
++
++    pub fn join(self) {
++        while self.done.load(Ordering::Acquire) == 0 {
++            futex_wait(&self.done, 0, None);
++        }
++    }
++}
++
++pub fn available_parallelism() -> io::Result<NonZero<usize>> {
++    NonZero::new(web_host::hardware_concurrency() as usize).ok_or(io::Error::UNKNOWN_THREAD_COUNT)
++}
++
++pub fn current_os_id() -> Option<u64> {
++    None
++}
++
++pub fn yield_now() {
++    crate::hint::spin_loop();
++}
++
++pub fn set_name(_name: &CStr) {}
++
++pub fn sleep(dur: Duration) {
++    if web_host::can_block() {
++        super::wasm::sleep(dur)
++    } else {
++        web_host::spin_sleep(dur)
++    }
++}
+diff --git a/std/src/sys/time/mod.rs b/std/src/sys/time/mod.rs
+index 179c968..28350b9 100644
+--- a/std/src/sys/time/mod.rs
++++ b/std/src/sys/time/mod.rs
+@@ -36,6 +36,13 @@ cfg_select! {
+         mod xous;
+         use xous as imp;
+     }
++    all(target_family = "wasm", target_os = "unknown", target_feature = "atomics") => {
++        // Horizon's browser platform: the clocks are the page's (sys/web_host.rs).
++        mod unsupported;
++        mod imp {
++            pub use super::unsupported::{Instant, SystemTime, UNIX_EPOCH};
++        }
++    }
+     _ => {
+         mod unsupported;
+         use unsupported as imp;
+diff --git a/std/src/sys/time/unsupported.rs b/std/src/sys/time/unsupported.rs
+index 9bdd572..6011099 100644
+--- a/std/src/sys/time/unsupported.rs
++++ b/std/src/sys/time/unsupported.rs
+@@ -10,7 +10,12 @@ pub const UNIX_EPOCH: SystemTime = SystemTime(Duration::from_secs(0));
+ 
+ impl Instant {
+     pub fn now() -> Instant {
+-        panic!("time not implemented on this platform")
++        #[cfg(all(target_family = "wasm", target_os = "unknown", target_feature = "atomics"))]
++        return Instant(crate::sys::web_host::monotonic());
++        #[allow(unreachable_code)]
++        {
++            panic!("time not implemented on this platform")
++        }
+     }
+ 
+     pub fn checked_sub_instant(&self, other: &Instant) -> Option<Duration> {
+@@ -32,7 +37,12 @@ impl SystemTime {
+     pub const MIN: SystemTime = SystemTime(Duration::ZERO);
+ 
+     pub fn now() -> SystemTime {
+-        panic!("time not implemented on this platform")
++        #[cfg(all(target_family = "wasm", target_os = "unknown", target_feature = "atomics"))]
++        return SystemTime(crate::sys::web_host::wall());
++        #[allow(unreachable_code)]
++        {
++            panic!("time not implemented on this platform")
++        }
+     }
+ 
+     pub fn sub_time(&self, other: &SystemTime) -> Result<Duration, Duration> {
+diff --git a/std/src/sys/web_host.rs b/std/src/sys/web_host.rs
+new file mode 100644
+index 0000000..e8043ad
+--- /dev/null
++++ b/std/src/sys/web_host.rs
+@@ -0,0 +1,189 @@
++//! Horizon's browser platform for `wasm32-unknown-unknown` with `+atomics`.
++//!
++//! The browser gives a wasm module no clock, filesystem or thread of its own. This module is the
++//! piece of std that the rest of the patched `sys` modules (`time/web.rs`, `thread/web.rs`,
++//! `fs/web.rs`, `env/web.rs`, `paths/web.rs`) share:
++//!
++//! * the host hooks: `extern "C"` functions the program itself defines (Horizon's web crate,
++//!   with js-sys), resolved when the final module links. std stays free of JS glue.
++//! * whether the running thread is the page's main thread, which may not block
++//!   (`memory.atomic.wait32` traps there): waits spin on it instead, as Emscripten does.
++//! * the thread pool. A Web Worker starts only once the thread that created it returns to the
++//!   browser's event loop, so a thread that spawns another and then waits for it would wait
++//!   forever. Idle workers wait ready ahead of time (each calls [`__horizon_web_worker_main`]); a
++//!   spawn hands its thread to one of them at once. The page's spawner, a worker that runs no
++//!   wasm and so is never blocked, starts more as [`WANTED`] asks, waiting on it with
++//!   `Atomics.waitAsync` (its address: [`__horizon_web_pool_wanted_addr`]). Each thread runs on a
++//!   fresh instance of the module, so it gets fresh thread-locals and its own stack; the worker
++//!   then sets up a new instance for the next one (web/worker.js).
++
++use crate::boxed::Box;
++use crate::cell::Cell;
++use crate::collections::VecDeque;
++use crate::sync::Mutex;
++use crate::sync::atomic::{Atomic, AtomicU32, Ordering};
++use crate::sys::sync::futex::{futex_wait, futex_wake, futex_wake_all};
++use crate::time::Duration;
++
++unsafe extern "C" {
++    /// Milliseconds on a clock that never goes back and is the same on every thread
++    /// (`performance.timeOrigin + performance.now()`).
++    fn __horizon_web_monotonic_ms() -> f64;
++    /// Milliseconds since the Unix epoch (`Date.now()`).
++    fn __horizon_web_wall_ms() -> f64;
++    /// `navigator.hardwareConcurrency`.
++    fn __horizon_web_hardware_concurrency() -> u32;
++    /// Fills `len` bytes at `ptr` from `crypto.getRandomValues`.
++    fn __horizon_web_random_fill(ptr: *mut u8, len: usize);
++    /// Bytes for the console (stdout and stderr), which the host buffers into lines.
++    fn __horizon_web_write_console(ptr: *const u8, len: usize);
++}
++
++pub fn random_fill(bytes: &mut [u8]) {
++    unsafe { __horizon_web_random_fill(bytes.as_mut_ptr(), bytes.len()) }
++}
++
++pub fn write_console(bytes: &[u8]) {
++    unsafe { __horizon_web_write_console(bytes.as_ptr(), bytes.len()) }
++}
++
++pub fn monotonic() -> Duration {
++    Duration::from_secs_f64(unsafe { __horizon_web_monotonic_ms() }.max(0.0) / 1000.0)
++}
++
++pub fn wall() -> Duration {
++    Duration::from_secs_f64(unsafe { __horizon_web_wall_ms() }.max(0.0) / 1000.0)
++}
++
++pub fn hardware_concurrency() -> u32 {
++    unsafe { __horizon_web_hardware_concurrency() }
++}
++
++#[thread_local]
++static IS_WORKER: Cell<bool> = Cell::new(false);
++
++/// Whether this thread may block: every thread but the page's main one.
++#[inline]
++pub fn can_block() -> bool {
++    IS_WORKER.get()
++}
++
++/// Waits while `futex` holds `expected`, by spinning: for the main thread, which can't block.
++/// False when `timeout` passed first.
++pub fn spin_wait(futex: &Atomic<u32>, expected: u32, timeout: Option<Duration>) -> bool {
++    let deadline = timeout.map(|t| monotonic() + t);
++    let mut spins = 0u32;
++    while futex.load(Ordering::Acquire) == expected {
++        spins = spins.wrapping_add(1);
++        // The clock is a call out to JS: look at it only now and then.
++        if spins % 1024 == 0
++            && let Some(deadline) = deadline
++            && monotonic() >= deadline
++        {
++            return false;
++        }
++        crate::hint::spin_loop();
++    }
++    true
++}
++
++/// Sleeps by spinning on the clock: for the main thread, which can't block.
++pub fn spin_sleep(dur: Duration) {
++    let until = monotonic() + dur;
++    while monotonic() < until {
++        crate::hint::spin_loop();
++    }
++}
++
++/// A thread to start, handed to an idle worker.
++pub struct Job {
++    pub run: Box<dyn FnOnce()>,
++}
++
++// SAFETY: the job's closure is the Rust thread's entry, which std::thread built from `Send` parts.
++unsafe impl Send for Job {}
++
++struct Pool {
++    jobs: VecDeque<Job>,
++}
++
++static POOL: Mutex<Pool> = Mutex::new(Pool { jobs: VecDeque::new() });
++/// Bumped on every push; idle workers wait on it.
++static POSTED: AtomicU32 = AtomicU32::new(0);
++/// Workers waiting for a job.
++static IDLE: AtomicU32 = AtomicU32::new(0);
++/// Idle workers the page should keep ready beyond the jobs waiting.
++static MIN_IDLE: AtomicU32 = AtomicU32::new(8);
++/// Threads posted that no worker has taken yet.
++static QUEUED: AtomicU32 = AtomicU32::new(0);
++/// How many more workers the pool needs: enough for every waiting thread plus the idle reserve.
++/// The spawner waits on it (`Atomics.waitAsync`) and subtracts the workers it started that
++/// haven't reached [`__horizon_web_worker_main`] yet.
++static WANTED: AtomicU32 = AtomicU32::new(0);
++
++fn update_wanted() {
++    let want = (MIN_IDLE.load(Ordering::Relaxed) + QUEUED.load(Ordering::Acquire))
++        .saturating_sub(IDLE.load(Ordering::Acquire));
++    if WANTED.swap(want, Ordering::AcqRel) != want {
++        futex_wake_all(&WANTED);
++    }
++}
++
++/// Queues a thread for the next idle worker.
++pub fn post(job: Job) {
++    POOL.lock().unwrap_or_else(|e| e.into_inner()).jobs.push_back(job);
++    QUEUED.fetch_add(1, Ordering::AcqRel);
++    POSTED.fetch_add(1, Ordering::Release);
++    futex_wake(&POSTED);
++    update_wanted();
++}
++
++/// How many more workers the pool needs now (see [`WANTED`]).
++#[unsafe(no_mangle)]
++pub extern "C" fn __horizon_web_pool_wanted() -> u32 {
++    WANTED.load(Ordering::Acquire)
++}
++
++/// Where [`WANTED`] is in memory, for the spawner's `Atomics.waitAsync`.
++#[unsafe(no_mangle)]
++pub extern "C" fn __horizon_web_pool_wanted_addr() -> usize {
++    WANTED.as_ptr() as usize
++}
++
++/// Sets how many idle workers the page keeps ready.
++#[unsafe(no_mangle)]
++pub extern "C" fn __horizon_web_pool_set_reserve(count: u32) {
++    MIN_IDLE.store(count, Ordering::Relaxed);
++    update_wanted();
++}
++
++/// Workers waiting for a thread to run.
++#[unsafe(no_mangle)]
++pub extern "C" fn __horizon_web_pool_idle() -> u32 {
++    IDLE.load(Ordering::Acquire)
++}
++
++/// A Web Worker's entry once wasm-bindgen has set it up: waits for one thread, runs it with its
++/// thread-local destructors, and returns. The page then frees the instance's stack and
++/// thread-locals (`__wbindgen_thread_destroy`) and sets up a new one on the same worker.
++#[unsafe(no_mangle)]
++pub extern "C" fn __horizon_web_worker_main() {
++    IS_WORKER.set(true);
++    IDLE.fetch_add(1, Ordering::AcqRel);
++    update_wanted();
++    let job = loop {
++        let seen = POSTED.load(Ordering::Acquire);
++        if let Some(job) = POOL.lock().unwrap_or_else(|e| e.into_inner()).jobs.pop_front() {
++            break job;
++        }
++        futex_wait(&POSTED, seen, None);
++    };
++    QUEUED.fetch_sub(1, Ordering::AcqRel);
++    IDLE.fetch_sub(1, Ordering::AcqRel);
++    update_wanted();
++    // Another idle worker may have been woken for a job this one took: let it look again.
++    if !POOL.lock().unwrap_or_else(|e| e.into_inner()).jobs.is_empty() {
++        futex_wake_all(&POSTED);
++    }
++    (job.run)();
++}

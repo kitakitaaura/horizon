@@ -125,6 +125,7 @@ pub trait Clipboard {
 /// game can still be pasted in the game.
 #[derive(Default)]
 pub struct SystemClipboard {
+    #[cfg(not(target_arch = "wasm32"))]
     system: Option<arboard::Clipboard>,
     /// The text Horizon last copied (`horizon-ctl status`).
     copied: Option<String>,
@@ -135,6 +136,7 @@ impl SystemClipboard {
     pub fn copied(&self) -> Option<&str> {
         self.copied.as_deref()
     }
+    #[cfg(not(target_arch = "wasm32"))]
     fn system(&mut self) -> Option<&mut arboard::Clipboard> {
         if self.system.is_none() {
             self.system = arboard::Clipboard::new().ok();
@@ -143,6 +145,7 @@ impl SystemClipboard {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Clipboard for SystemClipboard {
     fn get(&mut self) -> String {
         let Some(system) = self.system() else {
@@ -168,6 +171,42 @@ impl Clipboard for SystemClipboard {
         {
             self.system = None;
         }
+    }
+}
+
+/// The browser's clipboard. Reading it is asynchronous and needs a user gesture, so the page
+/// hands the text of each `paste` event to [`web_pasted`] and the game reads that; copying goes
+/// to `navigator.clipboard.writeText`.
+#[cfg(target_arch = "wasm32")]
+impl Clipboard for SystemClipboard {
+    fn get(&mut self) -> String {
+        web::PASTED
+            .with(|p| p.borrow().clone())
+            .or_else(|| self.copied.clone())
+            .unwrap_or_default()
+    }
+    fn set(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.copied = Some(text.to_owned());
+        web::PASTED.with(|p| *p.borrow_mut() = None);
+        if let Some(window) = web_sys::window() {
+            let _ = window.navigator().clipboard().write_text(text);
+        }
+    }
+}
+
+/// The text of the browser's last `paste` event, for the next [`Clipboard::get`].
+#[cfg(target_arch = "wasm32")]
+pub fn web_pasted(text: String) {
+    web::PASTED.with(|p| *p.borrow_mut() = Some(text));
+}
+
+#[cfg(target_arch = "wasm32")]
+mod web {
+    thread_local! {
+        pub(super) static PASTED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     }
 }
 

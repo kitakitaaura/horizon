@@ -183,10 +183,7 @@ pub fn census() -> Vec<(&'static str, isize)> {
     by_name
 }
 
-#[cfg(not(miri))]
-use mimalloc::MiMalloc as BackingAlloc;
-#[cfg(miri)]
-use std::alloc::System as BackingAlloc;
+use crate::BackingAlloc;
 
 /// mimalloc with a tag in front of each block (see the module).
 pub struct CensusAllocator;

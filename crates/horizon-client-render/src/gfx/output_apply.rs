@@ -298,8 +298,8 @@ impl Renderer {
                 hdr
             }
         };
-        let memory = pollster::block_on(memory.pop());
-        if let Some(e) = memory.or(pollster::block_on(validation.pop())) {
+        let memory = crate::gpu_thread::pop_now(memory);
+        if let Some(e) = memory.or(crate::gpu_thread::pop_now(validation)) {
             return Err(e.to_string());
         }
         // The metadata the swapchain's configuration sends.

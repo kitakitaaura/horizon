@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 pub mod compare;
 mod hardware;
 
-#[cfg(not(target_arch = "wasm32"))]
 pub use hardware::power_source;
+#[cfg(target_arch = "wasm32")]
+pub use hardware::process::{cpu_seconds, load_average, rss_bytes};
 pub use hardware::{Display, Gpu, Hardware};
 /// The process probes, from the platform (`horizon-system`).
 #[cfg(not(target_arch = "wasm32"))]
@@ -257,7 +258,6 @@ pub struct Report {
 
 impl Report {
     /// An empty report for this machine, created now.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(kind: Kind, app: App) -> Report {
         Self::with_hardware(kind, app, Hardware::detect())
     }

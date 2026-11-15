@@ -598,63 +598,61 @@ impl Presenter {
         let failed_here = failed.clone();
         let shown = Arc::new(AtomicBool::new(false));
         let shown_here = shown.clone();
-        let thread = thread::Builder::new()
-            .name("Frame generation present".into())
-            .spawn(move || {
-                let show = |texture: &wgpu::Texture| {
-                    if failed_here.load(Ordering::Relaxed) {
+        let thread = crate::gpu_thread::spawn("Frame generation present", move || {
+            let show = |texture: &wgpu::Texture| {
+                if failed_here.load(Ordering::Relaxed) {
+                    return;
+                }
+                // Anything but a frame (outdated, lost, occluded...): the renderer
+                // stops this thread and acquires itself, handling it as it does
+                // without frame generation. A suboptimal frame still shows.
+                // This runs off the main thread. On macOS the Metal acquire must
+                // not call into AppKit here, and `nextDrawable` must be able to
+                // time out: the main thread waits on this thread for targets.
+                let target = match surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(t) => t,
+                    wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+                        failed_here.store(true, Ordering::Relaxed);
+                        t
+                    }
+                    _ => {
+                        failed_here.store(true, Ordering::Relaxed);
                         return;
                     }
-                    // Anything but a frame (outdated, lost, occluded...): the renderer
-                    // stops this thread and acquires itself, handling it as it does
-                    // without frame generation. A suboptimal frame still shows.
-                    // This runs off the main thread. On macOS the Metal acquire must
-                    // not call into AppKit here, and `nextDrawable` must be able to
-                    // time out: the main thread waits on this thread for targets.
-                    let target = match surface.get_current_texture() {
-                        wgpu::CurrentSurfaceTexture::Success(t) => t,
-                        wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
-                            failed_here.store(true, Ordering::Relaxed);
-                            t
-                        }
-                        _ => {
-                            failed_here.store(true, Ordering::Relaxed);
-                            return;
-                        }
-                    };
-                    let mut encoder = device.create_command_encoder(&Default::default());
-                    encoder.copy_texture_to_texture(
-                        texture.as_image_copy(),
-                        target.texture.as_image_copy(),
-                        target.texture.size(),
-                    );
-                    queue.submit([encoder.finish()]);
-                    if notify_before_present(vsync) {
-                        window.pre_present_notify();
-                    }
-                    queue.present(target);
-                    shown_here.store(true, Ordering::Relaxed);
                 };
-                while let Ok(pair) = receive.recv() {
-                    if let Some(first) = pair.first {
-                        let shown = Instant::now();
-                        show(&first);
-                        let _ = give.send(first);
-                        // ponytail: sleep pacing; a spin for the last half millisecond
-                        // if it shows uneven on some systems.
-                        let due = shown + pair.interval / 2;
-                        if let Some(wait) = due.checked_duration_since(Instant::now()) {
-                            thread::sleep(wait);
-                        }
-                    }
-                    show(&pair.second);
-                    let _ = give.send(pair.second);
-                    if let Some(spare) = pair.spare {
-                        let _ = give.send(spare);
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.copy_texture_to_texture(
+                    texture.as_image_copy(),
+                    target.texture.as_image_copy(),
+                    target.texture.size(),
+                );
+                queue.submit([encoder.finish()]);
+                if notify_before_present(vsync) {
+                    window.pre_present_notify();
+                }
+                queue.present(target);
+                shown_here.store(true, Ordering::Relaxed);
+            };
+            while let Ok(pair) = receive.recv() {
+                if let Some(first) = pair.first {
+                    let shown = Instant::now();
+                    show(&first);
+                    let _ = give.send(first);
+                    // ponytail: sleep pacing; a spin for the last half millisecond
+                    // if it shows uneven on some systems.
+                    let due = shown + pair.interval / 2;
+                    if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                        thread::sleep(wait);
                     }
                 }
-            })
-            .expect("spawn the frame generation present thread");
+                show(&pair.second);
+                let _ = give.send(pair.second);
+                if let Some(spare) = pair.spare {
+                    let _ = give.send(spare);
+                }
+            }
+        })
+        .expect("spawn the frame generation present thread");
         Self {
             config: config.clone(),
             send: Some(send),

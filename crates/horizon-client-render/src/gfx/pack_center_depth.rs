@@ -195,7 +195,7 @@ impl CenterDepth {
 
     /// The readback of what the frame copied, to start by calling it right after the frame's
     /// submission: on the submit thread when the frame goes there, as culling's readback.
-    pub fn submitted(&mut self) -> Option<impl FnOnce() + Send + 'static> {
+    pub fn submitted(&mut self) -> Option<impl FnOnce() + crate::gpu_thread::MaybeSend + 'static> {
         let copied: Vec<_> = self
             .slots
             .iter()

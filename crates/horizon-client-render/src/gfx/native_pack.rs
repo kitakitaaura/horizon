@@ -196,7 +196,7 @@ impl NativePack {
         // is refused with that error instead of a validation panic in the renderer.
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let built = Self::build(device, queue, terrain, report, constants, lights);
-        let refused = pollster::block_on(scope.pop());
+        let refused = crate::gpu_thread::pop_now(scope);
         match (built, refused) {
             (Ok(built), None) => Ok(built),
             (Ok(_), Some(e)) => Err(e.to_string()),

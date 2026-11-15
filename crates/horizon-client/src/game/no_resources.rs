@@ -24,6 +24,7 @@ pub(super) fn show(looked_in: &std::path::Path, settings: &Settings) -> Result<(
         &[],
         &settings.language,
     ));
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     let mut app = Missing {
         window: None,
         renderer: None,
@@ -37,8 +38,18 @@ pub(super) fn show(looked_in: &std::path::Path, settings: &Settings) -> Result<(
         error: None,
     };
     horizon_client::hud::GUI_SCALE.store(settings.gui_scale, Ordering::Relaxed);
-    EventLoop::new()?.run_app(&mut app)?;
-    app.error.map_or(Ok(()), Err)
+    // The browser runs the loop from the page's callbacks: this returns at once.
+    #[cfg(target_arch = "wasm32")]
+    {
+        use winit::platform::web::EventLoopExtWebSys;
+        EventLoop::new()?.spawn_app(app);
+        Ok(())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        EventLoop::new()?.run_app(&mut app)?;
+        app.error.map_or(Ok(()), Err)
+    }
 }
 
 impl Missing {
@@ -168,7 +179,7 @@ impl ApplicationHandler for Missing {
             return;
         }
         // Wake now and then for Ctrl+C in the console; redraws come with events.
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
+        event_loop.set_control_flow(super::event_loop::wait_until(
             Instant::now() + Duration::from_millis(250),
         ));
     }

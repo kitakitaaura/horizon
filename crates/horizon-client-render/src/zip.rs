@@ -43,6 +43,16 @@ fn read_at(file: &fs::File, out: &mut [u8], at: u64) -> io::Result<usize> {
     return std::os::unix::fs::FileExt::read_at(file, out, at);
     #[cfg(windows)]
     return std::os::windows::fs::FileExt::seek_read(file, out, at);
+    // The browser's filesystem has no positioned read: seek and read under one lock.
+    #[cfg(target_arch = "wasm32")]
+    {
+        use std::io::{Read, Seek, SeekFrom};
+        static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let mut file = file;
+        file.seek(SeekFrom::Start(at))?;
+        file.read(out)
+    }
 }
 /// The bytes of `file` from `start` to `end`.
 fn read_range(file: &fs::File, start: u64, end: u64) -> io::Result<Vec<u8>> {

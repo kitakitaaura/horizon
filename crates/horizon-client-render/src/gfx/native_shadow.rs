@@ -734,7 +734,7 @@ impl NativeShadow {
                 "horizon_shadow_fs_displaced",
             )
         });
-        if let Some(e) = pollster::block_on(scope.pop()) {
+        if let Some(e) = crate::gpu_thread::pop_now(scope) {
             return Err(format!("shadow pass: {e}"));
         }
         Ok(Self {

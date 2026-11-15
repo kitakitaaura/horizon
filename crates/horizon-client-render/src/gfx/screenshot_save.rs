@@ -62,6 +62,19 @@ pub(super) struct Saves {
     sender: Sender<Saved>,
     receiver: Receiver<Saved>,
     in_flight: usize,
+    /// In the browser the readbacks can't leave the render thread: they wait here for their
+    /// mappings, and [`Saves::finished`] writes them in place.
+    #[cfg(target_arch = "wasm32")]
+    waiting: Vec<Waiting>,
+}
+/// A screenshot whose readbacks are still being mapped (in the browser).
+#[cfg(target_arch = "wasm32")]
+struct Waiting {
+    shot: Shot,
+    buffer: wgpu::Buffer,
+    on_mapped: Receiver<Result<(), String>>,
+    left: usize,
+    failed: Option<String>,
 }
 impl Saves {
     pub fn new(device: &wgpu::Device) -> Self {
@@ -71,6 +84,8 @@ impl Saves {
             sender,
             receiver,
             in_flight: 0,
+            #[cfg(target_arch = "wasm32")]
+            waiting: Vec::new(),
         }
     }
     /// Maps `buffer` (and the HDR copy's), whose copy was just submitted, and writes the
@@ -81,15 +96,30 @@ impl Saves {
         if let Some((_, hdr)) = &shot.hdr {
             map(hdr, &mapped);
         }
-        let done = self.sender.clone();
-        let path = shot.path.clone();
-        let spawned = std::thread::Builder::new()
-            .name("Screenshot writer".into())
-            .spawn(move || {
-                let count = 1 + usize::from(shot.hdr.is_some());
-                let ready = wait_mapped(&on_mapped, count);
-                let _ = done.send(write(shot, &buffer, ready));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let left = 1 + usize::from(shot.hdr.is_some());
+            self.waiting.push(Waiting {
+                shot,
+                buffer,
+                on_mapped,
+                left,
+                failed: None,
             });
+            self.in_flight += 1;
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let done = self.sender.clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        let path = shot.path.clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        let spawned = crate::gpu_thread::spawn("Screenshot writer", move || {
+            let count = 1 + usize::from(shot.hdr.is_some());
+            let ready = wait_mapped(&on_mapped, count);
+            let _ = done.send(write(shot, &buffer, ready));
+        });
+        #[cfg(not(target_arch = "wasm32"))]
         match spawned {
             Ok(_) => {}
             Err(e) => {
@@ -100,7 +130,10 @@ impl Saves {
                 });
             }
         }
-        self.in_flight += 1;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.in_flight += 1;
+        }
     }
     /// The screenshots written since the last call. Polls the device so a finished frame's
     /// mapping reaches its writer: the render thread never waits for it.
@@ -109,9 +142,36 @@ impl Saves {
             return Vec::new();
         }
         let _ = self.device.poll(wgpu::PollType::Poll);
+        #[cfg(target_arch = "wasm32")]
+        self.write_mapped();
         let saved: Vec<Saved> = self.receiver.try_iter().collect();
         self.in_flight -= saved.len();
         saved
+    }
+    /// Writes, on this thread, the waiting screenshots whose readbacks are mapped (the browser's
+    /// mappings resolve between frames, through its event loop).
+    #[cfg(target_arch = "wasm32")]
+    fn write_mapped(&mut self) {
+        let mut i = 0;
+        while i < self.waiting.len() {
+            let w = &mut self.waiting[i];
+            while w.left > 0
+                && w.failed.is_none()
+                && let Ok(mapped) = w.on_mapped.try_recv()
+            {
+                match mapped {
+                    Ok(()) => w.left -= 1,
+                    Err(e) => w.failed = Some(e),
+                }
+            }
+            if w.left == 0 || w.failed.is_some() {
+                let w = self.waiting.swap_remove(i);
+                let mapped = w.failed.map_or(Ok(()), Err);
+                let _ = self.sender.send(write(w.shot, &w.buffer, mapped));
+            } else {
+                i += 1;
+            }
+        }
     }
 }
 impl Drop for Saves {

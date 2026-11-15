@@ -1,0 +1,22 @@
+[package]
+name = "horizon-web"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Horizon in the browser: the host hooks of the patched std (web/std.patch), the worker pool's entry points, and the page's entry"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+# The game, without what the browser has no use for yet: desktop audio, controllers over HID,
+# Play with Friends' tunnel.
+horizon-client = { path = "../horizon-client", default-features = false }
+horizon-client-render = { path = "../horizon-client-render" }
+
+[lints]
+workspace = true

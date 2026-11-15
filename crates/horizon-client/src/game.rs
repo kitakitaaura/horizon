@@ -574,6 +574,8 @@ use key_codes::{
     glfw_button, glfw_modifiers, keyboard_button,
 };
 use launch_options::Options;
+// The browser's loop never returns, so it never leaves fullscreen after one.
+#[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
 use loading_screen::{
     App, Loading, leave_fullscreen_after, missing_resources, run_event_loop, unclean_start_recovery,
 };

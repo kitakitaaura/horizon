@@ -233,7 +233,7 @@ impl PackText {
         };
         let source = wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(program.fragment.clone()));
         let pipeline = Pipeline::new(device, &desc, source, coverage);
-        if let Some(e) = pollster::block_on(scope.pop()) {
+        if let Some(e) = crate::gpu_thread::pop_now(scope) {
             log::warn!("the resource pack's text shader is not used: {e}");
             return None;
         }

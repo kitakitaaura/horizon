@@ -278,7 +278,7 @@ fn with_scene<T>(
         entries: &entries,
     });
     let built = build(&layout);
-    let refused = pollster::block_on(scope.pop()).map(|e| e.to_string());
+    let refused = crate::gpu_thread::pop_now(scope).map(|e| e.to_string());
     let built = match (built, refused) {
         (Ok(built), None) => built,
         (Err(e), _) | (_, Some(e)) => {

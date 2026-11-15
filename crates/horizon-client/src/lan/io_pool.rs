@@ -9,6 +9,8 @@
 //! way: the pipe tells the thread when bytes arrive.
 use super::Body;
 use horizon_protocol::connection::{ConnReader, ConnWriter, Pipe, Socket};
+#[cfg(target_arch = "wasm32")]
+use super::web_poll as mio;
 use mio::{Events, Interest, Poll, Registry, Token, Waker};
 use std::{
     io::{ErrorKind, Read, Write},

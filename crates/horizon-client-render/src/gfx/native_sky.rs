@@ -143,7 +143,7 @@ impl NativeSky {
             &present,
             format,
         );
-        if let Some(e) = pollster::block_on(scope.pop()) {
+        if let Some(e) = crate::gpu_thread::pop_now(scope) {
             return Err(format!("{}: {e}", stage.file));
         }
         Ok(Self {
@@ -350,7 +350,7 @@ mod tests {
                 let format = wgpu::TextureFormat::Rgba8Unorm;
                 let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
                 let sky = NativeSky::new(&device, &globals, &frame, &stage, &[], format);
-                let internal = pollster::block_on(internal.pop());
+                let internal = crate::gpu_thread::pop_now(internal);
                 assert!(
                     sky.is_ok() && internal.is_none(),
                     "{name}, {label:?}: {internal:?}"

@@ -1,0 +1,128 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Horizon</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0b0b0d; color: #ddd; font: 14px system-ui, sans-serif; overflow: hidden; }
+  /* winit sets the window's size inline: the page decides it, and winit follows the canvas. */
+  canvas { display: block; width: 100vw !important; height: 100vh !important; outline: none; }
+  #files { position: fixed; inset: 0; display: none; place-items: center; background: #0b0b0d; z-index: 2; }
+  #files > div { max-width: 520px; padding: 0 16px; line-height: 1.5; }
+  #files h1 { font-size: 22px; font-weight: 600; margin: 0 0 8px; color: #f2f2f2; }
+  #files code { font: 13px ui-monospace, monospace; background: #1b1b20; padding: 1px 5px; border-radius: 4px; }
+  #files .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+  #files button, #files label.button { font: inherit; color: #f2f2f2; background: #26262d; border: 0; border-radius: 999px; padding: 8px 16px; cursor: pointer; }
+  #files label.button { background: #3a5bd9; }
+  #files input[type=file] { display: none; }
+  #status { position: fixed; left: 16px; bottom: 16px; max-width: calc(100vw - 32px); white-space: pre-wrap; font: 12px ui-monospace, monospace; opacity: .8; pointer-events: none; }
+</style>
+<div id="files"><div>
+  <h1>Your prepared game files</h1>
+  <p>Horizon doesn't ship Minecraft's files. Prepare them from your own copy of Minecraft: Java
+  Edition with <code>horizon-prepare --prepare</code> (it needs Java), then pick the folder it wrote,
+  <code>.local/horizon-client/26.3</code>. They stay in this browser's storage for next time.</p>
+  <div class="row">
+    <label class="button">Pick the folder<input id="pick" type="file" webkitdirectory></label>
+    <button id="skip">Start without them</button>
+  </div>
+</div></div>
+<div id="status">Starting Horizon…</div>
+<script>
+  // ?shaders: keep every WGSL module the game creates (label, code), for checking them against
+  // the browser's compiler (web/check_shaders.js).
+  if (new URLSearchParams(location.search).has("shaders") && self.GPUDevice) {
+    window.__shaders = [];
+    const create = GPUDevice.prototype.createShaderModule;
+    GPUDevice.prototype.createShaderModule = function (desc) {
+      window.__shaders.push({ label: desc.label || "", code: desc.code });
+      return create.call(this, desc);
+    };
+  }
+</script>
+<script type="module">
+  import { start } from "./horizon.js";
+  import * as resources from "./resources.js";
+  import * as saves from "./saves.js";
+  const status = document.getElementById("status");
+  const say = (text) => { status.textContent = text; console.log("[horizon page]", text); };
+  const params = new URLSearchParams(location.search);
+
+  // The prepared files: the stored copy, else the folder the player picks (or none: the game
+  // then says where to get them).
+  async function gameFiles(horizon) {
+    if (params.has("forget")) await resources.forget();
+    // While developing: import what `web/serve.py --resources <folder>` serves.
+    if (params.has("fetch")) {
+      const n = await resources.importServed(horizon, "/resources", {
+        withSounds: params.has("sounds"),
+        progress: (done, total) => say(`Importing the served game files… ${done} / ${total}`),
+      });
+      say(`Imported ${n} files`);
+      return n > 0;
+    }
+    if (await resources.stored()) {
+      say("Loading your stored game files…");
+      const n = await resources.load(horizon, { progress: (done) => say(`Loading your stored game files… ${done}`) });
+      return n > 0;
+    }
+    const panel = document.getElementById("files");
+    panel.style.display = "grid";
+    try {
+      return await new Promise((resolve, reject) => {
+        document.getElementById("skip").onclick = () => resolve(false);
+        document.getElementById("pick").onchange = async (event) => {
+          try {
+            panel.style.display = "none";
+            const n = await resources.importFiles(horizon, event.target.files, {
+              withSounds: params.has("sounds"),
+              progress: (done, total) => say(`Importing your game files… ${done} / ${total}`),
+            });
+            say(`Imported ${n} files`);
+            resolve(true);
+          } catch (e) {
+            panel.style.display = "grid";
+            say(String(e.message || e));
+          }
+        };
+      });
+    } finally {
+      panel.style.display = "none";
+    }
+  }
+
+  try {
+    say("Loading the module…");
+    // A debug build's module is about 400 MB: with it, ?reserve=4, or the tab runs out of memory.
+    const horizon = await start({ reserve: Number(params.get("reserve") || 32) });
+    window.horizon = horizon;
+    // ?probe: memory figures to the dev server's request log every second, which outlives a
+    // crashed tab (web/serve.py prints them).
+    if (params.has("probe")) {
+      setInterval(async () => {
+        const wasm = horizon.wasmMemoryBytes();
+        let total = "";
+        try { total = (await performance.measureUserAgentSpecificMemory()).bytes; } catch {}
+        const log = horizon.readFile("/horizon/logs/latest.log");
+        const last = log ? new TextDecoder().decode(log).trim().split("\n").pop().slice(0, 120) : "";
+        fetch(`/__probe?wasm=${wasm}&total=${total}&idle=${horizon.poolIdle()}&last=${encodeURIComponent(last)}`).catch(() => {});
+      }, 1000);
+    }
+    // The game's folder in the in-memory filesystem: logs, options, saves.
+    horizon.setEnv("HORIZON_HOME", "/horizon");
+    const args = params.getAll("arg");
+    if (await gameFiles(horizon)) args.push("--resources", resources.ROOT);
+    // Worlds and options from earlier visits (saves.js); ?forget-saves drops them.
+    if (params.has("forget-saves")) await saves.forget();
+    const restored = await saves.restore(horizon);
+    if (restored) say(`Restored ${restored} saved files`);
+    if (params.has("pause")) { say("paused before the game; horizon.startGame(" + JSON.stringify(args) + ") to go"); throw "paused"; }
+    say("Opening WebGPU…");
+    const adapter = await horizon.startGame(args);
+    say("WebGPU: " + adapter);
+    window.flushSaves = saves.keep(horizon, { log: (m) => console.log("[horizon saves]", m) });
+    setTimeout(() => { status.textContent = ""; }, 4000);
+  } catch (e) {
+    if (e !== "paused") say("Horizon could not start: " + (e && (e.stack || e.message) || e));
+  }
+</script>

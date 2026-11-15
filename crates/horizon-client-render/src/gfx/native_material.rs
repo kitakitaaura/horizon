@@ -479,7 +479,7 @@ impl NativeMaterial {
         };
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let built = build(&stage.source, &frame.layout);
-        if let Some(e) = pollster::block_on(scope.pop()) {
+        if let Some(e) = crate::gpu_thread::pop_now(scope) {
             return Err(format!("{}: {e}", stage.file));
         }
         let pipelines = built?;

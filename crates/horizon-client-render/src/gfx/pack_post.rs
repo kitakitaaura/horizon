@@ -1015,8 +1015,8 @@ fn checked<T>(device: &wgpu::Device, create: impl FnOnce() -> T) -> Result<T, St
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
     let value = crate::crash::contain(create);
-    let internal = pollster::block_on(internal.pop());
-    match pollster::block_on(validation.pop()).or(internal) {
+    let internal = crate::gpu_thread::pop_now(internal);
+    match crate::gpu_thread::pop_now(validation).or(internal) {
         Some(e) => {
             // The details are in the error's description or its sources.
             let mut message = match &e {
@@ -1459,18 +1459,26 @@ fn compile(
         .min(jobs.len().max(1));
     let next = AtomicUsize::new(0);
     let refused = std::sync::Mutex::new(None);
+    let work = || {
+        while !cancel.load(Ordering::Relaxed)
+            && let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed))
+        {
+            if let Err(e) = checked(device, || job.create(device)) {
+                let mut refused = refused.lock().unwrap_or_else(|e| e.into_inner());
+                refused.get_or_insert((job.label().to_owned(), e));
+            }
+        }
+    };
+    // In the browser the device stays on this thread: one compiles them all.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = threads;
+        work();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     std::thread::scope(|scope| {
         for _ in 0..threads {
-            scope.spawn(|| {
-                while !cancel.load(Ordering::Relaxed)
-                    && let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed))
-                {
-                    if let Err(e) = checked(device, || job.create(device)) {
-                        let mut refused = refused.lock().unwrap_or_else(|e| e.into_inner());
-                        refused.get_or_insert((job.label().to_owned(), e));
-                    }
-                }
-            });
+            scope.spawn(&work);
         }
     });
     refused.into_inner().unwrap_or_else(|e| e.into_inner())
@@ -4380,7 +4388,7 @@ impl PackPost {
 
     /// The centre depth the frame copied: its readback, started by calling it right after the
     /// frame's submission.
-    pub fn submitted(&mut self) -> Option<impl FnOnce() + Send + 'static> {
+    pub fn submitted(&mut self) -> Option<impl FnOnce() + crate::gpu_thread::MaybeSend + 'static> {
         self.center_depth.as_mut()?.submitted()
     }
 

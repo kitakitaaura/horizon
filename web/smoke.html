@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Horizon std smoke test</title>
+<style>body{font:14px ui-monospace,monospace;background:#111;color:#ddd;margin:16px}pre{white-space:pre-wrap}</style>
+<h1>Horizon std smoke test</h1>
+<pre id="out">starting…</pre>
+<script type="module">
+  import { start } from "./horizon.js";
+  const out = document.getElementById("out");
+  try {
+    const horizon = await start({ reserve: Number(new URLSearchParams(location.search).get("reserve") || 32) });
+    window.horizon = horizon;
+    out.textContent = "pool ready: " + horizon.poolIdle() + " idle workers";
+    if (new URLSearchParams(location.search).has("manual")) throw "manual";
+    const report = horizon.smokeTest();
+    out.textContent = report;
+    window.smokeReport = report;
+  } catch (e) {
+    out.textContent = "error: " + (e.stack || e);
+    window.smokeReport = "error: " + e;
+  }
+</script>

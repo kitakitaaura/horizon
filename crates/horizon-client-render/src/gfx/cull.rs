@@ -719,7 +719,7 @@ impl Cull {
 
     /// The frame's results to read back, started by calling it right after the frame's
     /// submission (on the submit thread, when the frame goes there).
-    pub fn submitted(&mut self) -> Option<impl FnOnce() + Send + 'static> {
+    pub fn submitted(&mut self) -> Option<impl FnOnce() + crate::gpu_thread::MaybeSend + 'static> {
         let i = self.current.take()?;
         let r = &self.readbacks[i];
         let state = r.state.clone();

@@ -39,7 +39,7 @@ impl HeadlessLoop {
     /// for (`WaitUntil`, as the closing save's polls do), else one frame later.
     fn next_step(&self, started: Instant) -> Instant {
         match self.flow.get() {
-            ControlFlow::WaitUntil(at) => at,
+            ControlFlow::WaitUntil(at) => super::event_loop::std_instant(at),
             ControlFlow::Poll | ControlFlow::Wait => started + FRAME,
         }
     }

@@ -53,6 +53,10 @@ members = [
     "crates/horizon-shader-api",
     "crates/horizon-release-sign",
     "crates/horizon-mod-deps",
+    # ureq natively; in the browser ureq's API over XMLHttpRequest.
+    "crates/horizon-ureq",
+    # Horizon in the browser (web/README.md).
+    "crates/horizon-web",
     "xtask",
 ]
 resolver = "2"

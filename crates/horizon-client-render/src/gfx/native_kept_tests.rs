@@ -124,7 +124,7 @@ fn every_shape_allocates_and_binds_without_a_validation_error() {
             });
         }
     }
-    let error = pollster::block_on(scope.pop());
+    let error = crate::gpu_thread::pop_now(scope);
     assert!(error.is_none(), "{error:?}");
 }
 
@@ -482,7 +482,7 @@ fn begin_starts_a_frame_once_and_clears_what_the_epochs_moved() {
     store.frame([3, 2], [4, 4]);
     assert_eq!(begin(&mut store, [4, 4]), (true, 1, [3, 2]));
     queue.submit([encoder.finish()]);
-    let error = pollster::block_on(scope.pop());
+    let error = crate::gpu_thread::pop_now(scope);
     assert!(error.is_none(), "{error:?}");
 }
 
@@ -707,7 +707,7 @@ fn a_kept_texture_ping_pongs_and_starts_over_on_a_reset_and_a_new_size() {
     assert!(near(reset, [0.0, 0.25, 0.6]), "{reset:?} after the reset");
     let resized = next(&mut chain, [2, 1], [2, 2]);
     assert!(near(resized, [0.0, 0.25, 0.6]), "{resized:?} at a new R");
-    let error = pollster::block_on(scope.pop());
+    let error = crate::gpu_thread::pop_now(scope);
     assert!(error.is_none(), "{error:?}");
 }
 
@@ -736,7 +736,7 @@ fn a_post_pass_loads_an_rgba32uint_texture_and_its_previous() {
         let near = got.iter().zip(shown).all(|(g, w)| g.abs_diff(w) <= 1);
         assert!(near, "{got:?}, {shown:?} expected");
     }
-    let error = pollster::block_on(scope.pop());
+    let error = crate::gpu_thread::pop_now(scope);
     assert!(error.is_none(), "{error:?}");
 }
 
@@ -766,7 +766,7 @@ fn computes(manifest: &str, files: &[(&str, &str)], frames: &[([u32; 2], [u32; 2
         shows(again, want),
         "run again: {again:?}, {want:?} expected"
     );
-    let error = pollster::block_on(scope.pop());
+    let error = crate::gpu_thread::pop_now(scope);
     assert!(error.is_none(), "{error:?}");
 }
 
@@ -942,7 +942,7 @@ fn through_pack(manifest: &str, files: &[(&str, &str)], wants: &[f32]) {
         let got = screen.show((&device, &queue), post, &pack.frame.surface_view, [4, 4]);
         assert!(shows(got, [want, 0.0, 0.0]), "{got:?}, {want} expected");
     }
-    let error = pollster::block_on(scope.pop());
+    let error = crate::gpu_thread::pop_now(scope);
     assert!(error.is_none(), "{error:?}");
 }
 
@@ -1283,6 +1283,6 @@ fn a_reload_never_holds_two_stores() {
         "{refused}"
     );
     assert_eq!(delta(built), Some([0, 0]));
-    assert!(pollster::block_on(scope.pop()).is_none());
+    assert!(crate::gpu_thread::pop_now(scope).is_none());
     assert_eq!(third.kept.as_ref().map(|k| k.held.len()), Some(2));
 }

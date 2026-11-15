@@ -1222,9 +1222,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 5.3.0",
  "wasip2",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1539,6 +1541,7 @@ dependencies = [
  "horizon-telemetry",
  "horizon-theme",
  "horizon-threads",
+ "horizon-ureq",
  "horizon-world",
  "log",
  "miniz_oxide 0.8.9",
@@ -1555,7 +1558,7 @@ dependencies = [
  "sha2",
  "toml",
  "unicode-bidi",
- "ureq",
+ "web-time",
  "wgpu",
  "winit",
  "winresource",
@@ -1578,6 +1581,7 @@ dependencies = [
  "horizon-client-core",
  "horizon-theme",
  "png",
+ "web-sys",
  "winit",
 ]
 
@@ -1619,6 +1623,7 @@ dependencies = [
  "horizon-telemetry",
  "horizon-theme",
  "horizon-threads",
+ "horizon-ureq",
  "horizon-world",
  "log",
  "miniz_oxide 0.8.9",
@@ -1637,7 +1642,6 @@ dependencies = [
  "sha1",
  "sha2",
  "unicode-bidi",
- "ureq",
  "wgpu",
  "winit",
  "xxhash-rust",
@@ -1675,6 +1679,7 @@ dependencies = [
  "horizon-system",
  "horizon-theme",
  "horizon-threads",
+ "horizon-ureq",
  "horizon-world",
  "image-webp",
  "log",
@@ -1691,7 +1696,6 @@ dependencies = [
  "smallvec",
  "symphonia",
  "unicode-bidi",
- "ureq",
  "wgpu",
  "winit",
  "zip",
@@ -1722,10 +1726,10 @@ dependencies = [
  "base64 0.22.1",
  "glam",
  "horizon-addresses",
+ "horizon-ureq",
  "png",
  "serde",
  "serde_json",
- "ureq",
 ]
 
 [[package]]
@@ -2071,9 +2075,9 @@ dependencies = [
  "getrandom 0.3.4",
  "horizon-core",
  "horizon-protocol",
+ "horizon-ureq",
  "horizon-world",
  "log",
- "ureq",
 ]
 
 [[package]]
@@ -2135,6 +2139,27 @@ dependencies = [
  "object",
  "rustc-demangle",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "horizon-ureq"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "ureq",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "horizon-web"
+version = "0.1.0"
+dependencies = [
+ "horizon-client",
+ "horizon-client-render",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

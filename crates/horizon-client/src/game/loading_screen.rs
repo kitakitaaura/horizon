@@ -6,6 +6,8 @@ use super::*;
 /// The window system ended the event loop with a failure (on Linux, a compositor dropping the
 /// connection after a protocol error) while fullscreen was on: the next start opens windowed, so a
 /// fullscreen the system can't show doesn't crash every launch (#2904).
+// The browser's loop never returns, so nothing leaves fullscreen after it.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(super) fn leave_fullscreen_after(
     result: &std::result::Result<(), EventLoopError>,
     settings: &mut Settings,
@@ -28,17 +30,27 @@ pub(super) fn run_event_loop(mut game: Game<'_>) -> Result<()> {
         write_report(&game)?;
         return game.error.take().map_or(Ok(()), Err);
     }
-    let mut split = split::Split::new(game);
-    let result = EventLoop::new()?.run_app(&mut split);
-    game = split.host;
-    narrator::stop();
-    leave_fullscreen_after(&result, &mut game.settings);
-    result?;
-    write_report(&game)?;
-    if let Some(e) = game.error.take() {
-        return Err(e);
+    // The browser starts every game through the loading screen (`run_loading`), whose loop
+    // owns the game.
+    #[cfg(target_arch = "wasm32")]
+    {
+        drop(game);
+        return Err("in the browser the game starts through the loading screen".into());
     }
-    Ok(())
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut split = split::Split::new(game);
+        let result = EventLoop::new()?.run_app(&mut split);
+        game = split.host;
+        narrator::stop();
+        leave_fullscreen_after(&result, &mut game.settings);
+        result?;
+        write_report(&game)?;
+        if let Some(e) = game.error.take() {
+            return Err(e);
+        }
+        Ok(())
+    }
 }
 
 /// The loading screen's state while the worker loads the resources.

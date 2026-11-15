@@ -297,27 +297,39 @@ pub(super) fn run_loading(
         menu,
         error: None,
     };
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     let mut app = App::Loading(Box::new(loading));
-    let result = EventLoop::new()?.run_app(&mut app);
-    narrator::stop();
-    match &mut app {
-        // Ready: splitscreen around P1's game.
-        App::Ready(split) => leave_fullscreen_after(&result, &mut split.host.settings),
-        App::Loading(loading) => leave_fullscreen_after(&result, &mut loading.settings),
+    // The browser runs the loop from the page's callbacks: this returns at once, and the game
+    // ends with the tab.
+    #[cfg(target_arch = "wasm32")]
+    {
+        use winit::platform::web::EventLoopExtWebSys;
+        EventLoop::new()?.spawn_app(app);
+        return Ok(());
     }
-    result?;
-    match app {
-        App::Ready(mut split) => {
-            write_report(&split.host)?;
-            if let Some(e) = split.host.error.take() {
-                return Err(e);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let result = EventLoop::new()?.run_app(&mut app);
+        narrator::stop();
+        match &mut app {
+            // Ready: splitscreen around P1's game.
+            App::Ready(split) => leave_fullscreen_after(&result, &mut split.host.settings),
+            App::Loading(loading) => leave_fullscreen_after(&result, &mut loading.settings),
+        }
+        result?;
+        match app {
+            App::Ready(mut split) => {
+                write_report(&split.host)?;
+                if let Some(e) = split.host.error.take() {
+                    return Err(e);
+                }
+            }
+            App::Loading(loading) => {
+                if let Some(e) = loading.error {
+                    return Err(e);
+                }
             }
         }
-        App::Loading(loading) => {
-            if let Some(e) = loading.error {
-                return Err(e);
-            }
-        }
+        Ok(())
     }
-    Ok(())
 }

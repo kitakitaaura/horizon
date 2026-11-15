@@ -1120,7 +1120,7 @@ impl NativePost {
             let layout = kept::pass(&kept, Some(i)).map_or(&pipeline_layout, |p| &p.pipeline);
             let label = &stage.label;
             let pipeline = post_pipeline(device, label, layout, stage.module, constants, target);
-            if let Some(e) = pollster::block_on(scope.pop()) {
+            if let Some(e) = crate::gpu_thread::pop_now(scope) {
                 return Err(format!("{}: {e}", stage.file));
             }
             passes.push((stage.label, pipeline));
@@ -1144,7 +1144,7 @@ impl NativePost {
             "horizon_fs_tonemap",
         );
         let pipeline = fullscreen_pipeline(device, "Tonemap", &module, stages, format, &present);
-        if let Some(e) = pollster::block_on(scope.pop()) {
+        if let Some(e) = crate::gpu_thread::pop_now(scope) {
             return Err(format!("{file}: {e}"));
         }
         let display = Display {

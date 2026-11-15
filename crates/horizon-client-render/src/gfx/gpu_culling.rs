@@ -947,8 +947,8 @@ impl BoxTest {
                 cache: None,
             })
         });
-        let internal = pollster::block_on(internal.pop());
-        if let Some(e) = internal.or(pollster::block_on(validation.pop())) {
+        let internal = crate::gpu_thread::pop_now(internal);
+        if let Some(e) = internal.or(crate::gpu_thread::pop_now(validation)) {
             log::warn!("Horizon renderer: GPU culling's occlusion test unavailable ({e})");
             return None;
         }
@@ -1086,8 +1086,8 @@ impl GpuCulling {
                 cache: None,
             })
         });
-        let internal = pollster::block_on(internal.pop());
-        if let Some(e) = internal.or(pollster::block_on(validation.pop())) {
+        let internal = crate::gpu_thread::pop_now(internal);
+        if let Some(e) = internal.or(crate::gpu_thread::pop_now(validation)) {
             log::warn!("Horizon renderer: GPU culling unavailable ({e})");
             return None;
         }
@@ -1554,7 +1554,7 @@ impl GpuCulling {
     /// The frame's statistics to read back, started by calling it right after
     /// the frame's submission (gfx's after-submit hook, on the submit thread
     /// when the frame goes there), as `cull::Cull::submitted`.
-    pub fn submitted(&mut self) -> Option<impl FnOnce() + Send + 'static> {
+    pub fn submitted(&mut self) -> Option<impl FnOnce() + crate::gpu_thread::MaybeSend + 'static> {
         let i = self.current.take()?;
         let r = &self.readbacks[i];
         let (buffer, state) = (r.buffer.clone(), r.state.clone());

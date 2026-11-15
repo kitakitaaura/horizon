@@ -2,3 +2,24 @@
 # web/perf/README.md work as written. `cargo run -p xtask -- …` stays equivalent.
 [alias]
 xtask = "run --package xtask --"
+
+# Browser build (web/build.sh): wasm32 with Wasm 3.0 features and shared-memory threads.
+# Only applies to the wasm32-unknown-unknown target; native builds are unaffected.
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext,+reference-types,+multivalue,+simd128,+relaxed-simd,+exception-handling,+tail-call",
+    # Panics abort: with panic=unwind wasm-bindgen requires UnwindSafe closures, which winit 0.30's aren't.
+    "-C", "panic=abort",
+    "-C", "llvm-args=-wasm-use-legacy-eh=false",
+    "-C", "link-arg=--shared-memory",
+    "-C", "link-arg=--import-memory",
+    "-C", "link-arg=--max-memory=4294967296",
+    # The page's main thread runs the game on wasm's own stack (1 MiB by default); a debug
+    # build's futures and frames overflow that, and wasm has no guard page to stop it.
+    "-C", "link-arg=-zstack-size=16777216",
+    "-C", "link-arg=--export=__wasm_init_tls",
+    "-C", "link-arg=--export=__tls_size",
+    "-C", "link-arg=--export=__tls_align",
+    "-C", "link-arg=--export=__tls_base",
+    "--cfg", "getrandom_backend=\"wasm_js\"",
+]

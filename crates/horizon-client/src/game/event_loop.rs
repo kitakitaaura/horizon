@@ -16,8 +16,30 @@ pub(super) fn redraw_flow(frame_drawn: &mut bool, offscreen: bool, now: Instant)
     if offscreen || drew_frame {
         ControlFlow::Poll
     } else {
-        ControlFlow::WaitUntil(now + Duration::from_millis(16))
+        wait_until(now + Duration::from_millis(16))
     }
+}
+
+/// `ControlFlow::WaitUntil(at)`. In the browser winit keeps time on its own clock (web-time's
+/// `Instant`), so the wait goes over as a duration from now.
+pub(super) fn wait_until(at: Instant) -> ControlFlow {
+    #[cfg(not(target_arch = "wasm32"))]
+    return ControlFlow::WaitUntil(at);
+    #[cfg(target_arch = "wasm32")]
+    ControlFlow::wait_duration(at.saturating_duration_since(Instant::now()))
+}
+
+/// The time a `ControlFlow::WaitUntil` names, on std's clock.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn std_instant(at: Instant) -> Instant {
+    at
+}
+
+/// The time a `ControlFlow::WaitUntil` names, on std's clock: the browser's winit names it on
+/// web-time's.
+#[cfg(target_arch = "wasm32")]
+pub(super) fn std_instant(at: web_time::Instant) -> Instant {
+    Instant::now() + at.saturating_duration_since(web_time::Instant::now())
 }
 
 pub(super) trait EventLoopCtl {

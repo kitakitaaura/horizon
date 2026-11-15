@@ -122,27 +122,12 @@ impl super::output::FrameRequest {
         }
     }
 }
-/// Opens a device on `adapter` and configures the window's `surface` on it (none
-/// offscreen). An adapter the surface offers no format on fails before its device opens.
-pub(super) async fn open_adapter(
-    name: &str,
-    window: &Arc<Window>,
-    surface: Option<&wgpu::Surface<'static>>,
+/// The device the renderer asks `adapter` for: the features below where it has them, and all
+/// of its limits.
+pub(super) fn device_descriptor(
     adapter: &wgpu::Adapter,
     needs: DeviceNeeds,
-) -> std::result::Result<Adapted, AdapterFailure> {
-    let caps = surface.map(|surface| surface.get_capabilities(adapter));
-    if caps.as_ref().is_some_and(|caps| caps.formats.is_empty()) {
-        return Err(AdapterFailure::CannotPresent(
-            "the window surface offers it no format".into(),
-        ));
-    }
-    describe_adapter(adapter);
-    let info = adapter.get_info();
-    let limits = adapter.limits();
-    if let Err(e) = check_layers(adapter, needs.layers) {
-        return Err(AdapterFailure::Failed(format!("{name}: {e}")));
-    }
+) -> wgpu::DeviceDescriptor<'static> {
     // Mappable primary buffers: section pages that no longer fit in
     // video memory go to system memory. Shader packs' 16-bit normalized buffers (render
     // targets with the adapter's own format features) and R11F_G11F_B10F: a float
@@ -167,6 +152,41 @@ pub(super) async fn open_adapter(
                 | wgpu::Features::CLEAR_TEXTURE
                 | wgpu::Features::TEXTURE_ATOMIC
                 | wgpu::Features::FLOAT32_FILTERABLE));
+    wgpu::DeviceDescriptor {
+        label: Some("Horizon device"),
+        required_features: features,
+        required_limits: adapter.limits(),
+        // Video memory in blocks of 8-64 MiB instead of 128-256 MiB (Vulkan and DirectX 12):
+        // with the larger blocks a few small buffers kept whole blocks the arena's pages had
+        // left, and over half the video memory reserved was unused (1,344 MiB for 500).
+        memory_hints: wgpu::MemoryHints::MemoryUsage,
+        experimental_features: ray_query::experimental(features),
+        ..Default::default()
+    }
+}
+/// Opens a device on `adapter` and configures the window's `surface` on it (none
+/// offscreen). An adapter the surface offers no format on fails before its device opens.
+pub(super) async fn open_adapter(
+    name: &str,
+    window: &Arc<Window>,
+    surface: Option<&wgpu::Surface<'static>>,
+    adapter: &wgpu::Adapter,
+    needs: DeviceNeeds,
+) -> std::result::Result<Adapted, AdapterFailure> {
+    let caps = surface.map(|surface| surface.get_capabilities(adapter));
+    if caps.as_ref().is_some_and(|caps| caps.formats.is_empty()) {
+        return Err(AdapterFailure::CannotPresent(
+            "the window surface offers it no format".into(),
+        ));
+    }
+    describe_adapter(adapter);
+    let info = adapter.get_info();
+    let limits = adapter.limits();
+    if let Err(e) = check_layers(adapter, needs.layers) {
+        return Err(AdapterFailure::Failed(format!("{name}: {e}")));
+    }
+    let desc = device_descriptor(adapter, needs);
+    let features = desc.required_features;
     let driver = format!("{} {}", info.driver, info.driver_info);
     startup_step(format_args!(
         "requesting the device (driver {}) with features [{features}] and the adapter's \
@@ -179,24 +199,18 @@ pub(super) async fn open_adapter(
         limits.max_storage_buffer_binding_size,
         limits.max_texture_array_layers,
     ));
-    let desc = wgpu::DeviceDescriptor {
-        label: Some("Horizon device"),
-        required_features: features,
-        required_limits: limits,
-        // Video memory in blocks of 8-64 MiB instead of 128-256 MiB (Vulkan and DirectX 12):
-        // with the larger blocks a few small buffers kept whole blocks the arena's pages had
-        // left, and over half the video memory reserved was unused (1,344 MiB for 500).
-        memory_hints: wgpu::MemoryHints::MemoryUsage,
-        experimental_features: ray_query::experimental(features),
-        ..Default::default()
-    };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_arch = "wasm32")))]
     let opened = match info.backend {
         wgpu::Backend::Vulkan => horizon_hdr::open_vulkan_device(adapter, &desc),
         _ => None,
     };
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_arch = "wasm32"))]
     let opened = None;
+    // The browser's device was opened before the game started (`gfx::preopen_web`), with this
+    // same descriptor: its request resolves only through the event loop, which the renderer's
+    // callers can't wait for.
+    #[cfg(target_arch = "wasm32")]
+    let opened = opened.or_else(|| web::device());
     let opened = match opened {
         Some(opened) => opened,
         None => adapter.request_device(&desc).await,
@@ -287,5 +301,74 @@ mod tests {
         let llvmpipe = [a(DiscreteGpu, true, true), a(Cpu, true, false)];
         assert_eq!(pick_adapter(&llvmpipe, false), None);
         assert_eq!(pick_adapter(&llvmpipe, true), Some(1));
+    }
+}
+
+/// The browser's WebGPU objects, opened by the page's async entry before the game starts.
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod web {
+    use std::cell::RefCell;
+
+    struct Opened {
+        instance: wgpu::Instance,
+        adapter: wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    }
+
+    thread_local! {
+        static OPENED: RefCell<Option<Opened>> = const { RefCell::new(None) };
+    }
+
+    /// Opens WebGPU's adapter and the device the renderer would ask for. Awaited by the page
+    /// before the game starts; every renderer after that shares them.
+    pub(crate) async fn preopen() -> Result<String, String> {
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::BROWSER_WEBGPU;
+        let instance = wgpu::Instance::new(descriptor);
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| format!("no WebGPU adapter: {e}"))?;
+        let needs = super::DeviceNeeds {
+            layers: 1,
+            rays: false,
+        };
+        let desc = super::device_descriptor(&adapter, needs);
+        let (device, queue) = adapter
+            .request_device(&desc)
+            .await
+            .map_err(|e| format!("no WebGPU device: {e}"))?;
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        OPENED.with(|o| {
+            *o.borrow_mut() = Some(Opened {
+                instance,
+                adapter,
+                device,
+                queue,
+            })
+        });
+        Ok(name)
+    }
+
+    pub(crate) fn instance_and_adapter() -> Option<(wgpu::Instance, wgpu::Adapter)> {
+        OPENED.with(|o| {
+            o.borrow()
+                .as_ref()
+                .map(|o| (o.instance.clone(), o.adapter.clone()))
+        })
+    }
+
+    pub(super) fn device() -> Option<Result<(wgpu::Device, wgpu::Queue), wgpu::RequestDeviceError>>
+    {
+        OPENED.with(|o| {
+            o.borrow()
+                .as_ref()
+                .map(|o| Ok((o.device.clone(), o.queue.clone())))
+        })
     }
 }

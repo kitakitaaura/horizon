@@ -11,6 +11,8 @@ autoexamples = false
 autotests = false
 
 [dependencies]
+# HTTPS: ureq natively; in the browser the same API over XMLHttpRequest.
+ureq = { package = "horizon-ureq", path = "../horizon-ureq" }
 horizon-cosmetics = { path = "../horizon-cosmetics" }
 horizon-client-lib = { path = "../horizon-client-lib", default-features = false }
 horizon-assets = { path = "../horizon-assets" }
@@ -84,10 +86,8 @@ gilrs = { version = "0.11", optional = true }
 # over HID (gilrs only reads them).
 horizon-dualsense = { path = "../horizon-dualsense", optional = true }
 # HTTPS to the Minecraft services (online-mode session join).
-ureq = { version = "2", default-features = false, features = ["tls"] }
 unicode-bidi = "0.3.18"
 # `LevelStorageAccess.estimateDiskSpace`: usable disk space, without unsafe code on Windows.
-fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
 
 [target.'cfg(unix)'.dependencies]
 # The server thread's CPU time per tick (`HORIZON_SPIKES`, spans.rs).
@@ -106,10 +106,20 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSWindow", "NSScreen"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString"] }
 
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+[target.'cfg(not(any(target_os = "macos", target_arch = "wasm32")))'.dependencies]
 # OpenGL (WGL on Windows, EGL on Linux), the last fallback, for GPUs with no Vulkan or
 # DirectX 12 driver (`graphicsApi`, graphics.rs).
 wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
+
+# winit's clock in the browser (game/event_loop.rs).
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-time]
+version = "1"
+
+# The browser draws with WebGPU.
+[target.'cfg(target_arch = "wasm32")'.dependencies.wgpu]
+version = "30.0.1"
+default-features = false
+features = ["webgpu"]
 
 [features]
 default = ["audio", "controllers", "horizon-extras"]
@@ -177,3 +187,8 @@ horizon-items = { path = "../horizon-items", features = ["test-support"] }
 horizon-perf = { path = "../horizon-perf" }
 # Every WGSL shader translated as wgpu's DirectX 12 backend does (gfx.rs tests).
 naga = { version = "30.0.1", features = ["wgsl-in", "hlsl-out", "msl-out", "spv-out"] }
+
+# Disk space (fs4) and the network threads' polling (mio): not in the browser, which has
+# neither (lan/web_poll.rs stands in for mio).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
