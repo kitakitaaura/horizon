@@ -13,6 +13,17 @@ pub async fn start_game(args: Vec<String>) -> Result<String, JsError> {
     for arg in &args {
         crate::host::push_arg(arg);
     }
-    horizon_client::entry::main();
+    // The engine with no code mods: the browser loads neither native nor wasm mods.
+    let startup = horizon_client::entry::prepare();
+    horizon_client::entry::start(
+        Default::default(),
+        |_, _| (Vec::new(), ()),
+        horizon_client::entry::CodeRuntime {
+            initialize: |_| {},
+            refusal: |_| None,
+            startup_refused: |_| false,
+        },
+        startup,
+    );
     Ok(adapter)
 }
