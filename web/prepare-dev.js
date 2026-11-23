@@ -94,7 +94,7 @@ async function prepareAlone(horizon, output, { say = () => {} } = {}) {
   // An unfinished preparation's files, from the page's storage: its finished steps are skipped.
   if (await resources.storedFile(PROGRESS)) {
     step("Continuing the preparation that stopped…");
-    await resources.load(horizon, { progress: (n) => say(`Restoring prepared files… ${n}`) });
+    await resources.load(horizon, { progress: resources.timeLeft(say, "Restoring prepared files") });
     await resources.load(horizon, { store: LOCAL_STORE, to: LOCAL }).catch(() => 0);
   } else {
     await resources.forget();

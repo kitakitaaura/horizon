@@ -177,6 +177,7 @@ async function importEntries(horizon, entries, { withSounds = false, progress = 
   await Promise.all(Array.from({ length: 16 }, async () => {
     while (next < chosen.length) await one(chosen[next++]);
   }));
+  rememberCount(STORE, chosen.length);
   return chosen.length;
 }
 
@@ -204,6 +205,8 @@ export async function storePaths(horizon, paths, { from = ROOT, store: name = ST
  */
 export async function load(horizon, { progress = () => {}, store: name = STORE, to = ROOT } = {}) {
   const store = await storeDir(false, name);
+  // The walk can't count the files ahead of it: the last load's (or import's) count stands in.
+  const total = knownCount(name);
   let done = 0;
   const walk = async (dir, path) => {
     for await (const [name, handle] of dir.entries()) {
@@ -213,11 +216,47 @@ export async function load(horizon, { progress = () => {}, store: name = STORE, 
       } else {
         const file = await handle.getFile();
         horizon.writeFile(`${to}/${at}`, new Uint8Array(await file.arrayBuffer()));
-        if (++done % 200 === 0) progress(done);
+        if (++done % 200 === 0) progress(done, done < total ? total : 0);
       }
     }
   };
   await walk(store, "");
-  progress(done);
+  rememberCount(name, done);
+  progress(done, done);
   return done;
+}
+
+/** How many files the stored copy `name` had when last loaded or imported; 0 when unknown. */
+function knownCount(name) {
+  try {
+    return Number(localStorage.getItem(`${name}.files`)) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function rememberCount(name, n) {
+  try {
+    localStorage.setItem(`${name}.files`, String(n));
+  } catch {
+    // Without it the next load shows no time left.
+  }
+}
+
+/**
+ * A `progress(done, total)` that shows `label… done / total, about N s left` through `say`: the
+ * time left at the rate so far. Without a total, only the count.
+ */
+export function timeLeft(say, label) {
+  const started = performance.now();
+  return (done, total) => {
+    if (!total) return say(`${label}… ${done}`);
+    let text = `${label}… ${done} / ${total}`;
+    const elapsed = (performance.now() - started) / 1000;
+    if (done > 0 && done < total && elapsed >= 1) {
+      const left = ((total - done) * elapsed) / done;
+      text += left < 60 ? `, about ${Math.ceil(left)} s left` : `, about ${Math.round(left / 60)} min left`;
+    }
+    say(text);
+  };
 }

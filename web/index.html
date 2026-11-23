@@ -97,14 +97,14 @@
     if (params.has("fetch")) {
       const n = await resources.importServed(horizon, "/resources", {
         withSounds: true,
-        progress: (done, total) => say(`Importing the served game files… ${done} / ${total}`),
+        progress: resources.timeLeft(say, "Importing the served game files"),
       });
       say(`Imported ${n} files`);
       return n > 0;
     }
     if (await resources.stored()) {
       say("Loading your stored game files…");
-      const n = await resources.load(horizon, { progress: (done) => say(`Loading your stored game files… ${done}`) });
+      const n = await resources.load(horizon, { progress: resources.timeLeft(say, "Loading your stored game files") });
       return n > 0;
     }
     const panel = document.getElementById("files");
@@ -117,7 +117,7 @@
             panel.style.display = "none";
             const n = await resources.importFiles(horizon, event.target.files, {
               withSounds: true,
-              progress: (done, total) => say(`Importing your game files… ${done} / ${total}`),
+              progress: resources.timeLeft(say, "Importing your game files"),
             });
             say(`Imported ${n} files`);
             resolve(true);
@@ -134,7 +134,7 @@
             panel.style.display = "none";
             const n = await resources.importZip(horizon, await zip.openZip(file), {
               withSounds: true,
-              progress: (done, total) => say(`Importing your game files… ${done} / ${total}`),
+              progress: resources.timeLeft(say, "Importing your game files"),
             });
             say(`Imported ${n} files`);
             resolve(true);
