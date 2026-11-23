@@ -468,7 +468,14 @@ struct Run<'a> {
     /// Tells the caller's thread that a lane opened a stage of `steps`: it counts them.
     stage: &'a (dyn Fn() + Sync),
     inputs: artifacts::Inputs,
+    /// The manifest keys of the steps finished so far (`PROGRESS`), written after each one so
+    /// an interrupted preparation (a browser tab discarded or closed) skips them next time.
+    progress: Mutex<Vec<(String, Value)>>,
 }
+
+/// The finished steps of a preparation still under way, in the resources folder; removed once
+/// `horizon-resources.json` is written.
+pub const PROGRESS: &str = ".horizon-prepare-progress.json";
 
 const PARITY: &str = "mods/horizon/src/test/java/dev/horizonlab/parity";
 
@@ -507,6 +514,31 @@ impl Run<'_> {
 
     fn file_hash(&self, name: &str) -> Result<Value, String> {
         Ok(Value::Str(digest(&self.resources.join(name), "sha256")?))
+    }
+
+    /// `{name: sha256}` of resource files.
+    fn file_hashes(&self, names: &[&str]) -> Result<Value, String> {
+        Ok(Value::Object(
+            names
+                .iter()
+                .map(|n| Ok((n.to_string(), self.file_hash(n)?)))
+                .collect::<Result<_, String>>()?,
+        ))
+    }
+
+    /// Records a finished step's manifest keys in `PROGRESS` (with the origin, which every
+    /// step's check compares too).
+    fn checkpoint(&self, entries: Vec<(&str, Value)>) -> Result<(), String> {
+        let mut done = self.progress.lock().unwrap();
+        for (key, value) in entries {
+            match done.iter_mut().find(|(k, _)| k == key) {
+                Some(slot) => slot.1 = value,
+                None => done.push((key.to_string(), value)),
+            }
+        }
+        let mut saved = self.origin.as_object().unwrap().to_vec();
+        saved.extend(done.iter().cloned());
+        write_json(&self.resources.join(PROGRESS), &Value::Object(saved))
     }
 
     /// Every file exists and has the hash the previous manifest recorded under `key`.
@@ -704,11 +736,17 @@ fn prepare_impl(
             Value::Str(digest(&oracle, "sha256")?),
         ),
     ]);
-    let previous = if manifest_path.exists() {
+    let mut previous = if manifest_path.exists() {
         read_json(&manifest_path)?
     } else {
         Value::Object(Vec::new())
     };
+    // An interrupted preparation's finished steps count as done, where their outputs still are.
+    if let Ok(Value::Object(saved)) = read_json(&resources.join(PROGRESS)) {
+        for (key, value) in saved {
+            previous.insert(&key, value);
+        }
+    }
     log(&format!("Checked the game files{}", took(started)));
     // The steps run on lanes of their own; their progress lines and stages come back here,
     // to `log` and `progress`.
@@ -740,6 +778,7 @@ fn prepare_impl(
                 log: &say,
                 stage: &stage,
                 inputs: options.inputs.clone(),
+                progress: Mutex::new(Vec::new()),
             };
             if compile_only {
                 return run.bundle();
@@ -888,6 +927,7 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
                 &root.join(log),
             )?;
         }
+        run.checkpoint(vec![(key, hashes.clone())])?;
         Ok(hashes)
     };
     let single = &single;
@@ -918,6 +958,7 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
                 &root.join("export.log"),
             )?;
         }
+        run.checkpoint(vec![("facts_sha256", run.file_hash("facts.json")?)])?;
 
         run.stage();
         if !(run.previous("motion_exporters_sha256") == Some(&motion_sources)
@@ -948,6 +989,11 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
                 &root.join("landing-definitions.json"),
             )?;
         }
+        run.checkpoint(vec![
+            ("motion_exporters_sha256", motion_sources.clone()),
+            ("block_tags_sha256", run.file_hash("block-tags.json")?),
+            ("motion_files_sha256", run.file_hashes(&motion_files)?),
+        ])?;
 
         run.stage();
         if !(run.previous("health_exporters_sha256") == Some(&health_sources)
@@ -987,6 +1033,10 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
                 copy(&export.join(source), &root.join(target))?;
             }
         }
+        run.checkpoint(vec![
+            ("health_exporters_sha256", health_sources.clone()),
+            ("health_files_sha256", run.file_hashes(&health_files)?),
+        ])?;
 
         let collision_file = root.join("cached-collision.nbt");
         run.stage();
@@ -1009,6 +1059,10 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
             )?;
             copy(&export.join("cached-collision.nbt"), &collision_file)?;
         }
+        run.checkpoint(vec![
+            ("collision_exporters_sha256", collision_sources.clone()),
+            ("collision_sha256", run.file_hash("cached-collision.nbt")?),
+        ])?;
 
         run.stage();
         if !(run.previous("render_exporters_sha256") == Some(&render_sources)
@@ -1035,6 +1089,11 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
             )?;
             copy(&export.join("occlusion.nbt"), &root.join("occlusion.nbt"))?;
         }
+        run.checkpoint(vec![
+            ("render_exporters_sha256", render_sources.clone()),
+            ("block_tags_sha256", run.file_hash("block-tags.json")?),
+            ("render_files_sha256", run.file_hashes(&render_files)?),
+        ])?;
 
         run.stage();
         let gameplay = single(
@@ -1122,6 +1181,10 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
                 &root.join("model-state-export.log"),
             )?;
         }
+        run.checkpoint(vec![
+            ("model_state_exporters_sha256", binding_sources.clone()),
+            ("model_states_sha256", run.file_hash("model-states.json")?),
+        ])?;
         run.stage();
         let entity_models = single(
             "entity models",
@@ -1171,6 +1234,10 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
             )?;
             copy(&export.join("registries.json"), &command_registries)?;
         }
+        run.checkpoint(vec![(
+            "command_registries_exporters_sha256",
+            command_sources.clone(),
+        )])?;
         Ok(vec![
             ("entity_model_exporters_sha256", entity_models),
             ("mob_data_exporters_sha256", mob_data),
@@ -1275,14 +1342,7 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
     worldgen_tables(run)?;
 
     let entry = |key: &str| entries.iter().find(|(k, _)| *k == key).unwrap().1.clone();
-    let file_hashes = |names: &[&str]| -> Result<Value, String> {
-        Ok(Value::Object(
-            names
-                .iter()
-                .map(|n| Ok((n.to_string(), run.file_hash(n)?)))
-                .collect::<Result<_, String>>()?,
-        ))
-    };
+    let file_hashes = |names: &[&str]| run.file_hashes(names);
     run.stage();
     let mut manifest = vec![("schema".to_string(), Value::Int(SCHEMA.to_string()))];
     manifest.extend(run.origin.as_object().unwrap().iter().cloned());
@@ -1346,7 +1406,11 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
     write_json(
         &root.join("horizon-resources.json"),
         &Value::Object(manifest),
-    )
+    )?;
+    match fs::remove_file(root.join(PROGRESS)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{PROGRESS}: {e}")),
+        _ => Ok(()),
+    }
 }
 
 /// Check existing JAR assets by their ZIP size/CRC without inflating every member again.
@@ -1426,6 +1490,13 @@ fn datagen_reports_missing(root: &Path) -> bool {
 }
 
 fn install_datagen_reports(root: &Path, reports: &Path) -> Result<(), String> {
+    // `datagen_reports_missing` takes these three files for the whole step: they go in last,
+    // `items.json` very last, so an interrupted install runs the generator again.
+    let biome_parameters = root.join("biome-parameters");
+    mkdir(&biome_parameters)?;
+    for file in json_files(&reports.join("biome_parameters/minecraft"))? {
+        copy(&file, &biome_parameters.join(file.file_name().unwrap()))?;
+    }
     for name in ["registries.json", "commands.json"] {
         copy(&reports.join(name), &root.join(name))?;
     }
@@ -1441,13 +1512,7 @@ fn install_datagen_reports(root: &Path, reports: &Path) -> Result<(), String> {
     write_text(
         &root.join("items.json"),
         &pyjson::dumps(&components, &pyjson::DEFAULT),
-    )?;
-    let biome_parameters = root.join("biome-parameters");
-    mkdir(&biome_parameters)?;
-    for file in json_files(&reports.join("biome_parameters/minecraft"))? {
-        copy(&file, &biome_parameters.join(file.file_name().unwrap()))?;
-    }
-    Ok(())
+    )
 }
 
 /// `sorted(directory.glob('*.json'))`: glob skips names starting with a dot.

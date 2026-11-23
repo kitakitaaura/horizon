@@ -14,9 +14,9 @@ const MANIFEST = "horizon-resources.json";
 const skip = (path, withSounds) =>
   !withSounds && (path.startsWith("assets/minecraft/sounds/") || path.endsWith(".ogg"));
 
-async function storeDir(create) {
+async function storeDir(create, name = STORE) {
   const root = await navigator.storage.getDirectory();
-  return root.getDirectoryHandle(STORE, { create });
+  return root.getDirectoryHandle(name, { create });
 }
 
 async function dirAt(base, parts, create) {
@@ -33,6 +33,44 @@ export async function stored() {
   } catch {
     return false;
   }
+}
+
+/** Whether the stored copy holds `name` (a path under it). */
+export async function storedFile(name) {
+  try {
+    const parts = name.split("/");
+    const file = parts.pop();
+    await (await dirAt(await storeDir(false), parts, false)).getFileHandle(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Removes `name` (a path under the stored copy), if there. */
+export async function removeStored(name) {
+  try {
+    const parts = name.split("/");
+    const file = parts.pop();
+    await (await dirAt(await storeDir(false), parts, false)).removeEntry(file);
+  } catch {}
+}
+
+/** Removes the stored copy's files whose paths `keep` (a Set) doesn't hold; the number removed. */
+export async function pruneStored(keep) {
+  let removed = 0;
+  const walk = async (dir, path) => {
+    for await (const [name, handle] of dir.entries()) {
+      const at = path ? `${path}/${name}` : name;
+      if (handle.kind === "directory") await walk(handle, at);
+      else if (!keep.has(at)) {
+        await dir.removeEntry(name).catch(() => {});
+        removed++;
+      }
+    }
+  };
+  await walk(await storeDir(false), "").catch(() => {});
+  return removed;
 }
 
 /** Removes the stored copy. */
@@ -142,11 +180,14 @@ async function importEntries(horizon, entries, { withSounds = false, progress = 
   return chosen.length;
 }
 
-/** Adds `paths` (under ROOT, as the game's filesystem has them now) to the stored copy. */
-export async function storePaths(horizon, paths) {
-  const store = await storeDir(true);
+/**
+ * Adds `paths` (under ROOT, as the game's filesystem has them now) to the stored copy; or, with
+ * `from` and `store`, paths under `from` to another directory of the page's storage.
+ */
+export async function storePaths(horizon, paths, { from = ROOT, store: name = STORE } = {}) {
+  const store = await storeDir(true, name);
   for (const path of paths) {
-    const bytes = horizon.readFile(`${ROOT}/${path}`);
+    const bytes = horizon.readFile(`${from}/${path}`);
     if (!bytes) continue;
     const parts = path.split("/");
     const name = parts.pop();
@@ -157,9 +198,12 @@ export async function storePaths(horizon, paths) {
   }
 }
 
-/** Loads the stored copy into the game's filesystem; the number of files. */
-export async function load(horizon, { progress = () => {} } = {}) {
-  const store = await storeDir(false);
+/**
+ * Loads the stored copy into the game's filesystem; the number of files. With `store` and `to`,
+ * another directory of the page's storage, into `to`.
+ */
+export async function load(horizon, { progress = () => {}, store: name = STORE, to = ROOT } = {}) {
+  const store = await storeDir(false, name);
   let done = 0;
   const walk = async (dir, path) => {
     for await (const [name, handle] of dir.entries()) {
@@ -168,7 +212,7 @@ export async function load(horizon, { progress = () => {} } = {}) {
         await walk(handle, at);
       } else {
         const file = await handle.getFile();
-        horizon.writeFile(`${ROOT}/${at}`, new Uint8Array(await file.arrayBuffer()));
+        horizon.writeFile(`${to}/${at}`, new Uint8Array(await file.arrayBuffer()));
         if (++done % 200 === 0) progress(done);
       }
     }

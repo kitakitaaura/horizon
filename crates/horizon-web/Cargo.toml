@@ -17,6 +17,8 @@ js-sys = "0.3"
 # HID, Play with Friends' tunnel.
 horizon-client = { path = "../horizon-client", default-features = false, features = ["audio"] }
 horizon-client-render = { path = "../horizon-client-render" }
+# The engine's platform socket, filled before the game starts (src/game.rs).
+horizon-engine-slots = { path = "../horizon-engine-slots" }
 # Preparation's steps that need no Java, run in the browser on files from the player's own
 # Minecraft folder (src/prepare.rs).
 horizon-prepare = { path = "../horizon-prepare" }

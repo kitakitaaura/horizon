@@ -266,8 +266,8 @@
     horizon.setEnv("HORIZON_HOME", "/horizon");
     const args = params.getAll("arg");
     if (params.has("prepare")) {
+      // It continues an unfinished preparation from the page's storage, else starts afresh.
       const { prepareFromServed } = await import("./prepare-dev.js");
-      await resources.forget();
       await prepareFromServed(horizon, resources.ROOT, { say });
       if (params.get("prepare") === "only") throw "paused";
       args.push("--resources", resources.ROOT);
