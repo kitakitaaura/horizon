@@ -23,6 +23,11 @@ use std::time::{Duration, Instant};
 /// The most `data` one request or answer carries; the worker splits larger reads and writes.
 const CAPACITY: usize = 1 << 20;
 
+/// How long the page's JVM spawner has to take a new JVM from [`MAILBOX`]. It takes one at once
+/// when it runs; when it doesn't (its runtime's .wasm failed to load), nothing else would ever
+/// answer, and the step would wait out its whole timeout.
+const PICKUP_TIMEOUT: Duration = Duration::from_secs(60);
+
 // A channel's words.
 const STATE: usize = 0;
 const OP: usize = 1;
@@ -206,6 +211,12 @@ enum Event {
 /// A running JVM.
 pub struct Jvm {
     channel: Option<Box<Channel>>,
+    /// The [`MAILBOX`] slot holding the channel and when it was put there, until the spawner
+    /// takes it.
+    waiting: Option<(usize, Instant)>,
+    /// Why it never started ([`Self::check_taken`]), for every later wait on it: the exporter
+    /// JVMs serve several steps, and each should say why.
+    never_started: Option<String>,
     stdin: Vec<u8>,
     /// No more input: a read gets the end of input.
     stdin_closed: bool,
@@ -242,13 +253,15 @@ impl Jvm {
         let slot = MAILBOX
             .slots
             .iter()
-            .find(|slot| slot.compare_exchange(0, address, SeqCst, SeqCst).is_ok());
-        if slot.is_none() {
+            .position(|slot| slot.compare_exchange(0, address, SeqCst, SeqCst).is_ok());
+        let Some(slot) = slot else {
             return Err("Too many Java runtimes at once".into());
-        }
+        };
         ring();
         Ok(Self {
             channel: Some(channel),
+            waiting: Some((slot, Instant::now())),
+            never_started: None,
             stdin: Vec::new(),
             stdin_closed: !interactive,
             stdout: Vec::new(),
@@ -278,6 +291,9 @@ impl Jvm {
                     .trim_end_matches('\r')
                     .into());
             }
+            if let Some(why) = &self.never_started {
+                return Err(why.clone());
+            }
             if let Some(code) = self.exit {
                 return Err(format!("Java stopped (exit {code})"));
             }
@@ -291,6 +307,9 @@ impl Jvm {
     pub fn wait(&mut self, timeout: Duration) -> Result<i32, String> {
         let deadline = Instant::now() + timeout;
         loop {
+            if let Some(why) = &self.never_started {
+                return Err(why.clone());
+            }
             if let Some(code) = self.exit {
                 return Ok(code);
             }
@@ -303,6 +322,7 @@ impl Jvm {
     /// Answers the JVM's next request.
     fn serve(&mut self, deadline: Instant) -> Result<Event, String> {
         loop {
+            self.check_taken()?;
             let channel = self.channel();
             if channel.word(FLAGS) & GONE != 0 && channel.word(STATE) != REQUEST {
                 self.exit.get_or_insert(-1);
@@ -326,6 +346,37 @@ impl Jvm {
         let event = self.answer(&channel);
         self.channel = Some(channel);
         Ok(event)
+    }
+
+    /// An error once the spawner has left this JVM in [`MAILBOX`] for [`PICKUP_TIMEOUT`], taken
+    /// back out so a spawner that starts later doesn't run it.
+    fn check_taken(&mut self) -> Result<(), String> {
+        let Some((slot, since)) = self.waiting else {
+            return Ok(());
+        };
+        let address = std::ptr::from_ref::<Channel>(self.channel()) as u32;
+        let slot = &MAILBOX.slots[slot];
+        if slot.load(SeqCst) != address {
+            self.waiting = None;
+            return Ok(());
+        }
+        if since.elapsed() < PICKUP_TIMEOUT {
+            return Ok(());
+        }
+        if slot.compare_exchange(address, 0, SeqCst, SeqCst).is_err() {
+            // Taken just now.
+            self.waiting = None;
+            return Ok(());
+        }
+        self.channel().words[FLAGS].fetch_or(GONE, SeqCst);
+        self.exit = Some(-1);
+        let why = format!(
+            "No Java runtime started in {} s: the page's Java spawner isn't running (did its \
+             runtime's .wasm load? The page's ?java= names it; the console says why)",
+            PICKUP_TIMEOUT.as_secs()
+        );
+        self.never_started = Some(why.clone());
+        Err(why)
     }
 
     fn answer(&mut self, channel: &Channel) -> Event {

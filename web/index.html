@@ -248,6 +248,14 @@
     const jvm = params.has("prepare")
       ? { wasm: `/mnt/bin/${params.get("java") || "java.wasm"}`, jdk: "/mnt/jdk", env: params.has("jit") ? { RISTRETTO_JIT: params.get("jit") } : {} }
       : undefined;
+    // Without its runtime no Java step would ever answer: say so now, not after the first step's
+    // wait for one.
+    if (jvm) {
+      const found = await fetch(jvm.wasm, { method: "HEAD" }).then((r) => r.ok, () => false);
+      if (!found) {
+        throw new Error(`No Java runtime at ${jvm.wasm}: name one with ?java=<a .wasm in serve.py's bin mount>, e.g. ?prepare=only&java=java-w40.wasm`);
+      }
+    }
     const horizon = await start({ reserve: Number(params.get("reserve") || 32), jvm });
     window.horizon = horizon;
     // ?probe: memory figures to the dev server's request log every second, which outlives a

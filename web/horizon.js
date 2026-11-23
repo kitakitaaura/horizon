@@ -57,6 +57,7 @@ export async function start({ reserve = 32, jvm } = {}) {
   spawner.postMessage({ module, memory: wasm.memory, stackSize: STACK_SIZE, wantedAddr: horizon.poolWantedAddr() });
   if (jvm) {
     const jvms = new Worker(new URL("./jvm/spawner.js", import.meta.url), { type: "module", name: "java spawner" });
+    jvms.onmessage = ({ data }) => data?.error && console.error(`[horizon] ${data.error}`);
     jvms.postMessage({ memory: wasm.memory, mailbox: horizon.jvmMailboxAddr(), ...jvm });
   }
   // Wait for the reserve before any Rust code spawns.

@@ -16,7 +16,16 @@ const HEADER = 64;
 
 self.onmessage = async ({ data }) => {
   const { memory, mailbox, jdk, env = {} } = data;
-  const wasm = await WebAssembly.compileStreaming(fetch(data.wasm));
+  let wasm;
+  try {
+    wasm = await WebAssembly.compileStreaming(fetch(data.wasm));
+  } catch (error) {
+    // No JVM can start: preparation gives up on its own (browser_jvm.rs PICKUP_TIMEOUT); this says why.
+    const why = `the Java runtime ${data.wasm} did not load: ${error.message || error}`;
+    console.error(`[jvm spawner] ${why}`);
+    self.postMessage({ error: why });
+    return;
+  }
   const count = new Int32Array(memory.buffer, mailbox, 1);
   const slots = new Uint32Array(memory.buffer, mailbox + 4, SLOTS);
   /** channel address -> { worker, words } */
