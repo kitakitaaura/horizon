@@ -633,6 +633,9 @@ impl Run<'_> {
         log: &Path,
     ) -> Result<(), String> {
         (self.log)(&format!("Exporting {what} ({})", mains.join(", ")));
+        // In the browser, what its JVM does meanwhile (`browser_jvm::activities`).
+        #[cfg(target_arch = "wasm32")]
+        let _step = browser_jvm::Step::enter(what);
         let fail = |e: String| format!("{e} while exporting {what}; see {}", log.display());
         // Compiled first, so the time is this step's (the JVM's start included).
         self.bundle().map_err(fail)?;

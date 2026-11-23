@@ -15,6 +15,49 @@ const PROGRESS = ".horizon-prepare-progress.json";
 // The exporters' scratch folder, kept beside the stored resources while a preparation runs.
 const LOCAL = "/.local";
 const LOCAL_STORE = "horizon-prepare-local";
+// How long each Java step took last time (seconds), for its time left: this browser's last run, else
+// these, from runs in Chrome on an M-series Mac with the tab in front (java-w40.wasm, JIT on).
+const STEP_SECONDS_KEY = "horizon.prepareStepSeconds";
+const STEP_SECONDS = {
+  "model bindings": 180,
+  "block states": 330,
+  "vanilla's data generator reports": 270,
+  "block behavior": 510,
+  "mob data": 40,
+  "entity models": 10,
+  "command registries": 250,
+  "the creative inventory": 230,
+  "movement and attributes": 270,
+  "gameplay facts": 160,
+  "face visibility": 55,
+};
+
+function stepSeconds() {
+  try {
+    return { ...STEP_SECONDS, ...JSON.parse(localStorage.getItem(STEP_SECONDS_KEY) || "{}") };
+  } catch {
+    return { ...STEP_SECONDS };
+  }
+}
+
+function rememberStep(what, seconds) {
+  try {
+    const known = JSON.parse(localStorage.getItem(STEP_SECONDS_KEY) || "{}");
+    known[what] = Math.round(seconds);
+    localStorage.setItem(STEP_SECONDS_KEY, JSON.stringify(known));
+  } catch {
+    // The next run shows no time left for it.
+  }
+}
+
+/** A step's time left in words, from how long it took last time; "" when unknown. */
+function stepLeft(what, elapsedMs, known) {
+  const total = known[what];
+  if (!total) return "";
+  const left = total - elapsedMs / 1000;
+  if (left < 15) return "almost done";
+  return left < 90 ? `about ${Math.ceil(left / 15) * 15} s left` : `about ${Math.round(left / 60)} min left`;
+}
 
 /**
  * Keeps the page's storage up to date with a preparation's files as they are written, so a tab
@@ -149,13 +192,15 @@ async function prepareAlone(horizon, output, { say = () => {} } = {}) {
   }));
   step(`Read ${copied} files (${(bytes / 2 ** 20).toFixed(0)} MiB)`);
 
-  step("Preparing…");
+  // Chrome runs a tab that isn't in front at low priority, on the slow cores: about 3x slower.
+  step("Preparing… keep this tab in front: in the background it runs about 3× slower");
   const title = document.title;
   const keep = mirror(horizon);
   // Closing the tab loses the steps under way: ask first.
   const warn = (event) => event.preventDefault();
   addEventListener("beforeunload", warn);
   const running = new Map();
+  const known = stepSeconds();
   const started0 = performance.now();
   horizon.prepareStart(output);
   try {
@@ -168,16 +213,25 @@ async function prepareAlone(horizon, output, { say = () => {} } = {}) {
         const started = line.match(/^Exporting (.+?) \(/);
         const ended = line.match(/^Exported (.+?) in /);
         if (started) running.set(started[1], performance.now());
-        if (ended) running.delete(ended[1]);
+        if (ended && running.has(ended[1])) {
+          rememberStep(ended[1], (performance.now() - running.get(ended[1])) / 1000);
+          running.delete(ended[1]);
+        }
       }
       if (!news.lines.length && running.size) {
         const now = performance.now();
         const mmss = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
-        const list = [...running].map(([what, since]) => `${what} ${mmss(now - since)}`).join(" · ");
+        // Each step's line, with what its Java runtime is doing (browser_jvm.rs Activity).
+        const list = [...running]
+          .map(([what, since]) => {
+            const detail = [news.java?.[what], stepLeft(what, now - since, known)].filter(Boolean).join("; ");
+            return `${what} ${mmss(now - since)}${detail ? ` (${detail})` : ""}`;
+          })
+          .join(" · ");
         say(`Running ${running.size} Java step${running.size > 1 ? "s" : ""} (${mmss(now - started0)} in): ${list}`);
       }
       // The tab's title shows how far it got, also from another tab.
-      document.title = `${Math.round(news.progress * 100)}% · Preparing Horizon`;
+      document.title = `${Math.round(news.progress * 100)}% · Preparing Horizon${document.hidden ? " (slow in the background)" : ""}`;
       if (news.lines.length) keep();
       if (news.done) {
         if (news.error) throw new Error(news.error);

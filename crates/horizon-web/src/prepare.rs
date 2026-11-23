@@ -91,7 +91,8 @@ pub fn prepare_start(output: &str) -> Result<(), JsError> {
 }
 
 /// The running preparation's news since the last call, as JSON: `{"lines": [...], "progress":
-/// 0..1, "done": bool, "error": null or why it failed, "output": the folder written}`.
+/// 0..1, "java": {step: what its JVM is doing}, "done": bool, "error": null or why it failed,
+/// "output": the folder written}`.
 #[wasm_bindgen(js_name = preparePoll)]
 pub fn prepare_poll() -> String {
     use horizon_prepare::pyjson::{COMPACT, Value, dumps};
@@ -112,6 +113,15 @@ pub fn prepare_poll() -> String {
                     Value::Array(lines.into_iter().map(Value::Str).collect()),
                 ),
                 ("progress".into(), Value::Float(j.progress.into())),
+                (
+                    "java".into(),
+                    Value::Object(
+                        horizon_prepare::browser_jvm::activities()
+                            .into_iter()
+                            .map(|(step, doing)| (step, Value::Str(doing)))
+                            .collect(),
+                    ),
+                ),
                 ("done".into(), Value::Bool(done)),
                 ("error".into(), error),
                 ("output".into(), output),

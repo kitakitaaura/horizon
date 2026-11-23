@@ -217,6 +217,8 @@ pub struct Jvm {
     /// Why it never started ([`Self::check_taken`]), for every later wait on it: the exporter
     /// JVMs serve several steps, and each should say why.
     never_started: Option<String>,
+    /// The step it served last ([`Step`]): a request for another means it started before.
+    step: Option<String>,
     stdin: Vec<u8>,
     /// No more input: a read gets the end of input.
     stdin_closed: bool,
@@ -262,6 +264,7 @@ impl Jvm {
             channel: Some(channel),
             waiting: Some((slot, Instant::now())),
             never_started: None,
+            step: None,
             stdin: Vec::new(),
             stdin_closed: !interactive,
             stdout: Vec::new(),
@@ -387,6 +390,21 @@ impl Jvm {
         // SAFETY: the worker handed `data` over with `REQUEST`.
         let data = unsafe { channel.data(len) }.to_vec();
         let (path, payload) = split_path(&data);
+        let step = STEP.with(|s| s.borrow().clone());
+        let warm = self.step.is_some() && self.step != step;
+        if step.is_some() {
+            self.step = step;
+        }
+        note(
+            op,
+            &path,
+            if op == READ {
+                channel.word(B) as usize
+            } else {
+                payload.len()
+            },
+            warm,
+        );
         let reply = |errno: i32, count: i32, bytes: &[u8]| {
             // SAFETY: this side holds `data` until `REPLY`.
             unsafe { channel.data_mut()[..bytes.len()].copy_from_slice(bytes) };
@@ -533,6 +551,122 @@ impl Drop for Jvm {
         // that JVM's answers as its own.
         Box::leak(channel);
     }
+}
+
+/// What a step's JVM did so far, from the requests it made: something to show the player while
+/// a step runs for minutes, as the exporters print almost nothing.
+#[derive(Default)]
+struct Activity {
+    requests: u64,
+    /// Bytes read from jars: Minecraft's code and data, as the JVM loads it; and when last.
+    jar_bytes: u64,
+    jar_read: Option<Instant>,
+    /// Its JVM had served an earlier step: started, with Minecraft loaded.
+    warm: bool,
+    /// Files the step created, and the last one's name.
+    written: u64,
+    last_written: String,
+}
+
+impl Activity {
+    fn describe(&self) -> String {
+        let mib = self.jar_bytes as f64 / f64::from(1 << 20);
+        let loading = self
+            .jar_read
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(3));
+        if self.written > 0 {
+            format!(
+                "writing {}, {} file{} so far",
+                self.last_written,
+                self.written,
+                if self.written == 1 { "" } else { "s" }
+            )
+        } else if loading {
+            format!("loading Minecraft, {mib:.0} MB")
+        } else if mib >= 1.0 {
+            format!("working, {mib:.0} MB of Minecraft loaded")
+        } else if self.warm || self.jar_bytes > 0 {
+            "working".into()
+        } else if self.requests > 0 {
+            "starting Java".into()
+        } else {
+            // Its exporter JVM is busy with another step, or not started yet.
+            "waiting for a free Java runtime".into()
+        }
+    }
+}
+
+/// The running steps' [`Activity`], by step.
+static ACTIVITY: std::sync::Mutex<Vec<(String, Activity)>> = std::sync::Mutex::new(Vec::new());
+
+thread_local! {
+    /// The step this thread runs (its JVM's requests are served on it): see [`Step`].
+    static STEP: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+fn activity<T>(f: impl FnOnce(&mut Vec<(String, Activity)>) -> T) -> T {
+    f(&mut ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// While it lives, the JVM requests this thread serves count for step `what`'s [`activities`].
+pub struct Step(String);
+
+impl Step {
+    pub fn enter(what: &str) -> Self {
+        STEP.with(|s| *s.borrow_mut() = Some(what.to_owned()));
+        activity(|a| a.push((what.to_owned(), Activity::default())));
+        Self(what.to_owned())
+    }
+}
+
+impl Drop for Step {
+    fn drop(&mut self) {
+        STEP.with(|s| *s.borrow_mut() = None);
+        activity(|a| a.retain(|(what, _)| *what != self.0));
+    }
+}
+
+/// What each running step's JVM is doing, in words: `(step, what it does)`.
+pub fn activities() -> Vec<(String, String)> {
+    activity(|a| {
+        a.iter()
+            .map(|(what, act)| (what.clone(), act.describe()))
+            .collect()
+    })
+}
+
+/// Counts request `op` on `path` (`count` bytes) for this thread's step; `warm`: the JVM making
+/// it had served a step before.
+fn note(op: i32, path: &Path, count: usize, warm: bool) {
+    let Some(step) = STEP.with(|s| s.borrow().clone()) else {
+        return;
+    };
+    activity(|a| {
+        let Some((_, act)) = a.iter_mut().find(|(what, _)| *what == step) else {
+            return;
+        };
+        act.requests += 1;
+        act.warm |= warm;
+        match op {
+            READ if path.extension().is_some_and(|e| e == "jar") => {
+                act.jar_bytes += count as u64;
+                act.jar_read = Some(Instant::now());
+            }
+            // Vanilla's own log files aren't the step's output.
+            CREATE
+                if !path
+                    .extension()
+                    .is_some_and(|e| e == "log" || e == "lock" || e == "gz") =>
+            {
+                act.written += 1;
+                act.last_written = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+            }
+            _ => {}
+        }
+    });
 }
 
 /// A request's path (absolute, in this filesystem) and what follows it.
