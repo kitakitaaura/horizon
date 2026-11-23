@@ -1,8 +1,10 @@
 // Horizon's prepared game files in the browser. Horizon ships none of Mojang's files: the player
 // prepares them from their own Minecraft with `horizon-prepare --prepare` (it needs Java, so it
-// runs natively), then picks the folder here. The files go into the game's in-memory filesystem
-// under ROOT, and a copy into the page's private storage (OPFS), so the next visit loads them from
-// there without asking again.
+// runs natively), then picks the folder here, or a zip of it (one this page exported on another
+// device too). The files go into the game's in-memory filesystem under ROOT, and a copy into the
+// page's private storage (OPFS), so the next visit loads them from there without asking again.
+
+import { within, writeZip } from "./zip.js";
 
 export const ROOT = "/resources";
 const STORE = "horizon-resources";
@@ -78,6 +80,42 @@ export async function importServed(horizon, base, options = {}) {
   return importEntries(horizon, entries, options);
 }
 
+/**
+ * Imports a zip of prepared files (zip.js's `openZip`): the folder holding horizon-resources.json,
+ * wherever it sits in the zip.
+ */
+export async function importZip(horizon, zip, options = {}) {
+  const folder = within(zip, MANIFEST);
+  if (!folder) {
+    throw new Error(`no ${MANIFEST} in ${zip.name || "the zip"}: zip the folder horizon-prepare wrote (.local/horizon-client/<version>), or one Horizon exported`);
+  }
+  const entries = folder.paths().map((path) => ({ path, bytes: () => folder.read(path) }));
+  return importEntries(horizon, entries, options);
+}
+
+/**
+ * Writes the stored copy as a zip to `sink` (zip.js's `saveSink`), to import on another device.
+ * `progress(done)` as it goes; returns the number of files.
+ */
+export async function exportZip(sink, { progress = () => {} } = {}) {
+  const store = await storeDir(false);
+  let done = 0;
+  async function* walk(dir, path) {
+    for await (const [name, handle] of dir.entries()) {
+      const at = path ? `${path}/${name}` : name;
+      if (handle.kind === "directory") {
+        yield* walk(handle, at);
+      } else {
+        yield { path: at, bytes: new Uint8Array(await (await handle.getFile()).arrayBuffer()) };
+        if (++done % 200 === 0) progress(done);
+      }
+    }
+  }
+  const n = await writeZip(walk(store, ""), sink);
+  progress(n);
+  return n;
+}
+
 async function importEntries(horizon, entries, { withSounds = false, progress = () => {} } = {}) {
   const chosen = entries.filter(({ path }) => !skip(path, withSounds));
   await forget();
@@ -102,6 +140,21 @@ async function importEntries(horizon, entries, { withSounds = false, progress = 
     while (next < chosen.length) await one(chosen[next++]);
   }));
   return chosen.length;
+}
+
+/** Adds `paths` (under ROOT, as the game's filesystem has them now) to the stored copy. */
+export async function storePaths(horizon, paths) {
+  const store = await storeDir(true);
+  for (const path of paths) {
+    const bytes = horizon.readFile(`${ROOT}/${path}`);
+    if (!bytes) continue;
+    const parts = path.split("/");
+    const name = parts.pop();
+    const handle = await (await dirAt(store, parts, true)).getFileHandle(name, { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(bytes);
+    await writable.close();
+  }
 }
 
 /** Loads the stored copy into the game's filesystem; the number of files. */

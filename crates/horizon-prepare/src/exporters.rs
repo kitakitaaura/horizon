@@ -18,6 +18,7 @@ const SERVER: &[&str] = &[
     "VanillaCreativeTabsExporter",
     "VanillaSimpleBlockOracle",
     "VanillaStructureBlockExporter",
+    "HorizonReports",
     "PrepareWorker",
 ];
 const CLIENT: &[&str] = &[
@@ -43,7 +44,7 @@ fn files(dir: &Path) -> Result<Vec<PathBuf>, String> {
 
 // research-lock pins both jars and every accepted client manifest (which pins its libraries).
 // artifacts::verify/client_libraries check those dependencies before any bundle is used.
-pub(crate) fn key(root: &Path) -> Result<String, String> {
+pub fn key(root: &Path) -> Result<String, String> {
     let mut hash = sha2::Sha256::new();
     hash.update(SETTINGS);
     // The launcher's bundled preparer may differ from the selected game's. Hash that

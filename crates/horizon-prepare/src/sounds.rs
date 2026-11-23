@@ -239,6 +239,29 @@ pub fn add_assets(
     assets.copy(*wanted, label, required, log)
 }
 
+/// The SHA-1s of the asset-store objects `kind` copies, read from the asset index's bytes: what a
+/// caller that can't list the store itself (the browser, from a picked folder) has to bring.
+pub fn wanted_objects(kind: &str, index: &[u8]) -> Result<Vec<String>, String> {
+    let (_, wanted, ..) = KINDS
+        .iter()
+        .find(|(name, ..)| *name == kind)
+        .ok_or_else(|| format!("no assets called {kind}"))?;
+    let text = std::str::from_utf8(index).map_err(|e| e.to_string())?;
+    let index = crate::pyjson::loads(text)?;
+    let objects = index
+        .get("objects")
+        .and_then(Value::as_object)
+        .ok_or("the asset index has no objects")?;
+    let mut hashes: Vec<String> = objects
+        .iter()
+        .filter(|(name, _)| wanted(name))
+        .filter_map(|(_, info)| info.get("hash").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    hashes.sort();
+    hashes.dedup();
+    Ok(hashes)
+}
+
 /// A preparation's index and verified destinations. Never persisted: a later invocation
 /// checks the bytes again, including when repairing a corrupt prepared file.
 pub(crate) struct Assets {

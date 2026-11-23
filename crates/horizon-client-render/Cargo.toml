@@ -71,6 +71,12 @@ wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }
 [target.'cfg(not(any(target_os = "macos", target_arch = "wasm32")))'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
 
+# The browser plays through Web Audio (cpal's webaudio host), with the same `audio` feature.
+[target.'cfg(target_arch = "wasm32")'.dependencies.cpal]
+version = "0.16"
+optional = true
+features = ["wasm-bindgen"]
+
 # The browser draws with WebGPU.
 [target.'cfg(target_arch = "wasm32")'.dependencies.wgpu]
 version = "30.0.1"

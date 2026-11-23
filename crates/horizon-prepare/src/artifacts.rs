@@ -67,7 +67,7 @@ impl Lock {
         })
     }
 
-    fn pin(&self, key: &str) -> Result<&str, String> {
+    pub fn pin(&self, key: &str) -> Result<&str, String> {
         self.json
             .get("minecraft")
             .and_then(|m| m.get(key))
@@ -932,6 +932,15 @@ fn client_library_artifacts(manifest: &Value) -> Result<Vec<(&str, &Value)>, Str
 /// (`EventLoopGroupHolder.remote` asks `KQueue.isAvailable()`, then `Epoll.isAvailable()`), and
 /// Prism Launcher never downloads them (#1487). Preparing imports one when the launcher has it.
 fn runs_without(name: &str) -> bool {
+    // The browser's JVM loads no native code, and the player's launcher has its own system's.
+    if cfg!(target_arch = "wasm32")
+        && name
+            .split(':')
+            .nth(3)
+            .is_some_and(|c| c.starts_with("natives-"))
+    {
+        return true;
+    }
     let mut parts = name.split(':');
     parts.next() == Some("io.netty")
         && parts
@@ -1132,15 +1141,21 @@ pub fn import(
     })?;
     // Prism Launcher never downloads the server jar. Its client jar contains every server class
     // (and Prism's libraries are a superset of the server bundle's), so the client jar is the
-    // server side of exporters and the data generator instead.
+    // server side of exporters and the data generator instead. So in the browser, where the
+    // player brings a launcher's folder and no server jar.
+    let client_fallback = files.prism.is_some() || cfg!(target_arch = "wasm32");
     let (server, server_libraries, server_from_client) =
-        match import_server(lock, server_jar, files.prism.is_some())? {
+        match import_server(lock, server_jar, client_fallback)? {
             Some(server) => {
                 let (game, libraries) = unpack_server(server, &lock.directory, id)?;
                 (game, libraries, false)
             }
             None => {
-                log("Prism has no server jar: using its client jar for the server side");
+                log(if files.prism.is_some() {
+                    "Prism has no server jar: using its client jar for the server side"
+                } else {
+                    "No server jar: using the client jar for the server side"
+                });
                 (client.clone(), client_libraries.clone(), true)
             }
         };

@@ -24,8 +24,23 @@ cargo run --release -p horizon-prepare -- --prepare --minecraft-dir /path/to/min
 
 Then open the page and pick the folder it wrote, `.local/horizon-client/26.3`. The page copies it
 into the game's filesystem (`/resources`, passed as `--resources`) and into the browser's private
-storage (OPFS), so later visits load it from there (`resources.js`). Sounds are left out (no audio
-yet; `?sounds` keeps them); `?forget` clears the stored copy.
+storage (OPFS), so later visits load it from there (`resources.js`). Sounds come along (the game
+plays them through Web Audio); a folder prepared without them gets an "Add sound" panel, which reads
+them from the player's Minecraft folder. `?forget` clears the stored copy.
+
+A zip of that folder works too ("Pick a zip"; `zip.js` reads it entry by entry, so its size
+doesn't matter), and so does a zip of the Minecraft folder for the sound step. `?files` opens a
+panel before the game loads: "Export as zip" writes the stored copy as a zip, to import on another
+device without preparing there, and "Remove" clears it.
+
+Preparing in the page (in progress): `horizon-prepare`'s Java steps run on Java runtimes in the
+page, Ristretto's wasm32-wasip1 build in workers (`jvm/`: `wasi.js` is the WASI layer, `rpc.js` the
+channel through which the JVM's files and streams go to the preparation thread, which answers from
+the game's filesystem; `spawner.js` starts them; crates/horizon-prepare/src/browser_jvm.rs is the
+Rust side). While developing, `?prepare=only&java=<.wasm>&jit=1` runs a whole preparation from
+served folders (`prepare-dev.js`; serve.py `--mount jdk=… bin=… java-src=… exporters=…`, see
+.claude/launch.json). The exporter classes come prebuilt (`/exporters`, the key
+`prepareExportersKey()` names). `jvm-check.html` runs one Java program on a runtime by itself.
 
 Pages: `index.html` (the game), `smoke.html` (checks of the patched std).
 `index.html` takes `?reserve=N` (idle workers kept ready; 32 by default, 4 with a debug build,

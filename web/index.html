@@ -7,6 +7,13 @@
   html, body { margin: 0; height: 100%; background: #0b0b0d; color: #ddd; font: 14px system-ui, sans-serif; overflow: hidden; }
   /* winit sets the window's size inline: the page decides it, and winit follows the canvas. */
   canvas { display: block; width: 100vw !important; height: 100vh !important; outline: none; }
+  #sounds { position: fixed; inset: 0; display: none; place-items: center; background: #0b0b0d; z-index: 2; }
+  #sounds > div { max-width: 520px; padding: 0 16px; line-height: 1.5; }
+  #sounds h1 { font-size: 22px; font-weight: 600; margin: 0 0 8px; color: #f2f2f2; }
+  #sounds code { font: 13px ui-monospace, monospace; background: #1b1b20; padding: 1px 5px; border-radius: 4px; }
+  #sounds .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+  #sounds button { font: inherit; color: #f2f2f2; background: #26262d; border: 0; border-radius: 999px; padding: 8px 16px; cursor: pointer; }
+  #sounds button.primary { background: #3a5bd9; }
   #files { position: fixed; inset: 0; display: none; place-items: center; background: #0b0b0d; z-index: 2; }
   #files > div { max-width: 520px; padding: 0 16px; line-height: 1.5; }
   #files h1 { font-size: 22px; font-weight: 600; margin: 0 0 8px; color: #f2f2f2; }
@@ -15,16 +22,48 @@
   #files button, #files label.button { font: inherit; color: #f2f2f2; background: #26262d; border: 0; border-radius: 999px; padding: 8px 16px; cursor: pointer; }
   #files label.button { background: #3a5bd9; }
   #files input[type=file] { display: none; }
+  #manage { position: fixed; inset: 0; display: none; place-items: center; background: #0b0b0d; z-index: 2; }
+  #manage > div { max-width: 520px; padding: 0 16px; line-height: 1.5; }
+  #manage h1 { font-size: 22px; font-weight: 600; margin: 0 0 8px; color: #f2f2f2; }
+  #manage .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+  #manage button, #manage label.button { font: inherit; color: #f2f2f2; background: #26262d; border: 0; border-radius: 999px; padding: 8px 16px; cursor: pointer; }
+  #manage button.primary { background: #3a5bd9; }
+  #manage input[type=file], #sounds input[type=file] { display: none; }
+  #sounds label.button { font: inherit; color: #f2f2f2; background: #26262d; border-radius: 999px; padding: 8px 16px; cursor: pointer; }
   #status { position: fixed; left: 16px; bottom: 16px; max-width: calc(100vw - 32px); white-space: pre-wrap; font: 12px ui-monospace, monospace; opacity: .8; pointer-events: none; }
 </style>
 <div id="files"><div>
   <h1>Your prepared game files</h1>
   <p>Horizon doesn't ship Minecraft's files. Prepare them from your own copy of Minecraft: Java
   Edition with <code>horizon-prepare --prepare</code> (it needs Java), then pick the folder it wrote,
-  <code>.local/horizon-client/26.3</code>. They stay in this browser's storage for next time.</p>
+  <code>.local/horizon-client/26.3</code>, or a zip of it (one Horizon exported on another device
+  works too). They stay in this browser's storage for next time.</p>
   <div class="row">
     <label class="button">Pick the folder<input id="pick" type="file" webkitdirectory></label>
+    <label class="button">Pick a zip<input id="pick-zip" type="file" accept=".zip,application/zip"></label>
     <button id="skip">Start without them</button>
+  </div>
+</div></div>
+<div id="sounds" class="panel"><div>
+  <h1>Add sound</h1>
+  <p>Horizon takes the game's sounds from your own Minecraft. Pick the folder your launcher plays
+  Minecraft 26.3 from (the official launcher's <code>minecraft</code>, or SKLauncher's or Prism's
+  folder). Only the sounds are read; they stay in this browser's storage.</p>
+  <div class="row">
+    <button id="pick-minecraft" class="primary">Pick my Minecraft folder</button>
+    <label class="button">Pick a zip of it<input id="pick-minecraft-zip" type="file" accept=".zip,application/zip"></label>
+    <button id="no-sounds">Not now</button>
+  </div>
+</div></div>
+<div id="manage"><div>
+  <h1>Your game files</h1>
+  <p>This browser keeps the game files you imported. Export them as a zip to play on another device:
+  pick the zip there instead of preparing again. The zip holds Minecraft's files from your own copy,
+  so keep it to yourself.</p>
+  <div class="row">
+    <button id="export" class="primary">Export as zip</button>
+    <button id="forget">Remove them from this browser</button>
+    <button id="manage-done">Back</button>
   </div>
 </div></div>
 <div id="status">Starting Horizon…</div>
@@ -44,6 +83,8 @@
   import { start } from "./horizon.js";
   import * as resources from "./resources.js";
   import * as saves from "./saves.js";
+  import * as minecraft from "./minecraft.js";
+  import * as zip from "./zip.js";
   const status = document.getElementById("status");
   const say = (text) => { status.textContent = text; console.log("[horizon page]", text); };
   const params = new URLSearchParams(location.search);
@@ -55,7 +96,7 @@
     // While developing: import what `web/serve.py --resources <folder>` serves.
     if (params.has("fetch")) {
       const n = await resources.importServed(horizon, "/resources", {
-        withSounds: params.has("sounds"),
+        withSounds: true,
         progress: (done, total) => say(`Importing the served game files… ${done} / ${total}`),
       });
       say(`Imported ${n} files`);
@@ -75,7 +116,24 @@
           try {
             panel.style.display = "none";
             const n = await resources.importFiles(horizon, event.target.files, {
-              withSounds: params.has("sounds"),
+              withSounds: true,
+              progress: (done, total) => say(`Importing your game files… ${done} / ${total}`),
+            });
+            say(`Imported ${n} files`);
+            resolve(true);
+          } catch (e) {
+            panel.style.display = "grid";
+            say(String(e.message || e));
+          }
+        };
+        document.getElementById("pick-zip").onchange = async (event) => {
+          const file = event.target.files[0];
+          event.target.value = "";
+          if (!file) return;
+          try {
+            panel.style.display = "none";
+            const n = await resources.importZip(horizon, await zip.openZip(file), {
+              withSounds: true,
               progress: (done, total) => say(`Importing your game files… ${done} / ${total}`),
             });
             say(`Imported ${n} files`);
@@ -91,10 +149,106 @@
     }
   }
 
+  // Sound: prepared files made without `horizon-prepare sounds` have none. Ask once for the
+  // Minecraft folder and run that step here (minecraft.js); "Not now" is remembered.
+  async function addSounds(horizon) {
+    if (horizon.readFile(`${resources.ROOT}/assets/minecraft/sounds.json`)) return;
+    if (params.has("fetch-minecraft")) {
+      const added = await minecraft.addAssets(horizon, minecraft.servedFolder(), ["sounds"], resources.ROOT, { say });
+      await resources.storePaths(horizon, added);
+      say(`Added ${added.length} sound files`);
+      return;
+    }
+    try { if (localStorage.getItem("horizon.noSounds")) return; } catch {}
+    const panel = document.getElementById("sounds");
+    panel.style.display = "grid";
+    try {
+      await new Promise((resolve) => {
+        document.getElementById("no-sounds").onclick = () => {
+          try { localStorage.setItem("horizon.noSounds", "1"); } catch {}
+          resolve();
+        };
+        document.getElementById("pick-minecraft").onclick = async () => {
+          try {
+            const folder = await minecraft.pickFolder();
+            panel.style.display = "none";
+            const added = await minecraft.addAssets(horizon, folder, ["sounds"], resources.ROOT, { say });
+            say(`Storing ${added.length} sound files…`);
+            await resources.storePaths(horizon, added);
+            say(`Added ${added.length} sound files`);
+            resolve();
+          } catch (e) {
+            panel.style.display = "grid";
+            if (e.name !== "AbortError") say("Sound: " + (e.message || e));
+          }
+        };
+        document.getElementById("pick-minecraft-zip").onchange = async (event) => {
+          const file = event.target.files[0];
+          event.target.value = "";
+          if (!file) return;
+          try {
+            panel.style.display = "none";
+            const folder = zip.within(await zip.openZip(file), "assets/indexes");
+            if (!folder) throw new Error(`${file.name} has no assets/indexes folder: zip the Minecraft folder your launcher plays 26.3 from`);
+            const added = await minecraft.addAssets(horizon, folder, ["sounds"], resources.ROOT, { say });
+            say(`Storing ${added.length} sound files…`);
+            await resources.storePaths(horizon, added);
+            say(`Added ${added.length} sound files`);
+            resolve();
+          } catch (e) {
+            panel.style.display = "grid";
+            say("Sound: " + (e.message || e));
+          }
+        };
+      });
+    } finally {
+      panel.style.display = "none";
+    }
+  }
+
+  // ?files: what this browser keeps of the game files, before anything loads: export them as a
+  // zip for another device, or remove them.
+  async function manageFiles() {
+    const panel = document.getElementById("manage");
+    const has = await resources.stored();
+    document.getElementById("export").disabled = !has;
+    document.getElementById("forget").disabled = !has;
+    if (!has) say("This browser keeps no game files yet.");
+    panel.style.display = "grid";
+    try {
+      await new Promise((resolve) => {
+        document.getElementById("manage-done").onclick = resolve;
+        document.getElementById("export").onclick = async () => {
+          try {
+            const sink = await zip.saveSink("horizon-game-files.zip");
+            const n = await resources.exportZip(sink, { progress: (done) => say(`Exporting… ${done} files`) });
+            say(`Exported ${n} files`);
+          } catch (e) {
+            if (e.name !== "AbortError") say("Export: " + (e.message || e));
+          }
+        };
+        document.getElementById("forget").onclick = async () => {
+          if (!confirm("Remove the game files from this browser? You'd import them again next time.")) return;
+          await resources.forget();
+          say("Removed the game files from this browser.");
+          resolve();
+        };
+      });
+    } finally {
+      panel.style.display = "none";
+    }
+  }
+
   try {
+    if (params.has("files")) await manageFiles();
     say("Loading the module…");
     // A debug build's module is about 400 MB: with it, ?reserve=4, or the tab runs out of memory.
-    const horizon = await start({ reserve: Number(params.get("reserve") || 32) });
+    // ?prepare (while developing): prepare the game files here, the exporters on the page's Java
+    // runtimes (prepare-dev.js; ?java=<.wasm in the bin mount>, ?jit=1).
+    const jvm = params.has("prepare")
+      ? { wasm: `/mnt/bin/${params.get("java") || "java.wasm"}`, jdk: "/mnt/jdk", env: params.has("jit") ? { RISTRETTO_JIT: params.get("jit") } : {} }
+      : undefined;
+    const horizon = await start({ reserve: Number(params.get("reserve") || 32), jvm });
     window.horizon = horizon;
     // ?probe: memory figures to the dev server's request log every second, which outlives a
     // crashed tab (web/serve.py prints them).
@@ -111,7 +265,16 @@
     // The game's folder in the in-memory filesystem: logs, options, saves.
     horizon.setEnv("HORIZON_HOME", "/horizon");
     const args = params.getAll("arg");
-    if (await gameFiles(horizon)) args.push("--resources", resources.ROOT);
+    if (params.has("prepare")) {
+      const { prepareFromServed } = await import("./prepare-dev.js");
+      await resources.forget();
+      await prepareFromServed(horizon, resources.ROOT, { say });
+      if (params.get("prepare") === "only") throw "paused";
+      args.push("--resources", resources.ROOT);
+    } else if (await gameFiles(horizon)) {
+      args.push("--resources", resources.ROOT);
+      await addSounds(horizon);
+    }
     // Worlds and options from earlier visits (saves.js); ?forget-saves drops them.
     if (params.has("forget-saves")) await saves.forget();
     const restored = await saves.restore(horizon);

@@ -1,0 +1,87 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Java runtime check</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 16px; background: #0b0b0d; color: #ddd; font: 13px ui-monospace, monospace; }
+  #summary { white-space: pre-wrap; color: #f2f2f2; margin-bottom: 12px; }
+  #log { white-space: pre-wrap; opacity: .8; }
+</style>
+<div id="summary">Starting…</div>
+<div id="log"></div>
+<script type="module">
+  // Runs a Java program on the page's Java runtime (web/jvm/), for checking it in a browser while
+  // developing. Serve with
+  //   web/serve.py --mount jdk=<JDK image> --mount cls=<classes> --mount x=<extracted server jar>
+  //                --mount bin=<folder with the runtime's .wasm> [--mount ref=<expected output>]
+  // and open jvm-check.html?main=ProbeV&cp=<classpath>&wasm=<file in bin>&jit=1&collect=/w/out-node.
+  // With a `ref` mount, the collected files are compared with it by SHA-256.
+  const params = new URLSearchParams(location.search);
+  const summary = document.getElementById("summary");
+  const log = document.getElementById("log");
+  const lines = (window.jvmLog = []);
+  const show = (text) => {
+    lines.push(text);
+    if (lines.length % 50 === 0 || text.startsWith("probe")) log.textContent = lines.slice(-200).join("\n");
+  };
+  const cp = params.get("cp");
+  const main = params.get("main") || "Hello";
+  const env = { JAVA_HOME: "/jdk" };
+  if (params.has("jit")) env.RISTRETTO_JIT = params.get("jit");
+  if (params.has("gc-log")) env.RISTRETTO_GC_LOG = "1";
+  const worker = new Worker(new URL("./jvm/worker.js", import.meta.url), { type: "module" });
+  const result = (window.jvmResult = { done: false });
+  summary.textContent = `Running ${main}…`;
+  worker.onmessage = async ({ data }) => {
+    if (data.out !== undefined) show(data.out);
+    else if (data.err !== undefined) show(data.err);
+    else if (data.files) result.files = data.files;
+    else if (data.exit !== undefined) {
+      Object.assign(result, { exit: data.exit, error: data.error, seconds: data.seconds, memory: data.memory });
+      let text = `${main}: exit ${data.exit} after ${data.seconds.toFixed(1)} s, wasm memory ${(data.memory / 2 ** 20).toFixed(0)} MiB`;
+      if (data.error) text += `\n${data.error}`;
+      if (result.files) {
+        text += `\n${result.files.length} files collected`;
+        if (params.has("ref")) text += "\n" + (await compare(result.files));
+      }
+      summary.textContent = text;
+      log.textContent = lines.slice(-200).join("\n");
+      result.done = true;
+      result.summary = text;
+    }
+  };
+  worker.onerror = (e) => {
+    summary.textContent = `worker error: ${e.message}`;
+    result.done = true;
+  };
+
+  async function compare(files) {
+    const hex = async (bytes) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const index = await (await fetch("/mnt/ref/.index.json")).json();
+    const mine = new Map(files.map(([path, bytes]) => [path, bytes]));
+    const differ = [];
+    for (const [path] of index) {
+      const bytes = mine.get(path);
+      if (!bytes) differ.push(`missing ${path}`);
+      else if ((await hex(bytes)) !== (await hex(await (await fetch(`/mnt/ref/${path}`)).arrayBuffer()))) differ.push(`differs ${path}`);
+      mine.delete(path);
+    }
+    for (const path of mine.keys()) differ.push(`extra ${path}`);
+    result.differ = differ;
+    return differ.length ? `${differ.length} differences:\n${differ.slice(0, 20).join("\n")}` : `all ${index.length} files match ${"ref"}`;
+  }
+
+  worker.postMessage({
+    wasm: `/mnt/bin/${params.get("wasm") || "java.wasm"}`,
+    args: ["java", ...(cp ? ["--cp", cp] : []), main, ...params.getAll("arg")],
+    env,
+    mounts: [
+      { at: "/jdk", http: "/mnt/jdk" },
+      { at: "/w/cls", http: "/mnt/cls" },
+      { at: "/w/x", http: "/mnt/x" },
+      { at: "/w" },
+    ],
+    collect: params.get("collect"),
+  });
+</script>

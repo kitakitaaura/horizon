@@ -243,6 +243,13 @@ pub fn find(major: i64, more: &[PathBuf]) -> Result<Jdk, String> {
 
 /// Finds a compatible runtime; precompiled exporters do not need javac.
 pub fn find_runtime(major: i64, more: &[PathBuf]) -> Result<Jdk, String> {
+    // The browser's Java is the page's (browser_jvm.rs): its image is at /jdk.
+    if cfg!(target_arch = "wasm32") {
+        return Ok(Jdk {
+            javac: PathBuf::from("/jdk/bin/javac"),
+            java: PathBuf::from("/jdk/bin/java"),
+        });
+    }
     find_tools(major, more, false)
 }
 
@@ -393,6 +400,13 @@ impl Jdk {
     /// `javac --release <major> -proc:none` with Python's `subprocess.run(..., check=True,
     /// stdout=log, stderr=STDOUT, timeout=3600)`.
     pub fn javac(&self, major: i64, args: &[String], log: &fs::File) -> Result<(), String> {
+        if cfg!(target_arch = "wasm32") {
+            return Err(
+                "The browser has no Java compiler: it needs the prebuilt exporter classes \
+                        (exporters/ beside research-lock.json)"
+                    .into(),
+            );
+        }
         let mut command = command(&self.javac);
         command
             .args(BATCH_OPTIONS.map(|option| format!("-J{option}")))
@@ -402,6 +416,13 @@ impl Jdk {
     }
 
     pub fn java(&self, args: &[String], cwd: Option<&Path>, log: &fs::File) -> Result<(), String> {
+        // The browser's JVM has no working directory of its own: relative paths are from `/`.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = cwd;
+            return crate::browser_jvm::run(args, log, TIMEOUT);
+        }
+        #[allow(unreachable_code)]
         let mut command = command(&self.java);
         command.args(BATCH_OPTIONS).args(args);
         if let Some(dir) = cwd {

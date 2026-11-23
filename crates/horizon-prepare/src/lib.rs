@@ -10,7 +10,12 @@
 //! checks it), so the manifest's `schema` is unchanged. Unchanged steps are skipped on the next
 //! run, keyed by the sha256 of their inputs and outputs recorded in the manifest, as before.
 
+// The browser's JVM bridge waits on shared memory (browser_jvm.rs); its toolchain is nightly.
+#![cfg_attr(target_arch = "wasm32", feature(stdarch_wasm_atomic_wait))]
+
 pub mod artifacts;
+#[cfg(target_arch = "wasm32")]
+pub mod browser_jvm;
 mod check;
 pub mod exporters;
 mod files;
@@ -25,7 +30,9 @@ mod worker;
 
 pub use check::{check, missing_extras, STAMP};
 pub use files::clone_or_copy;
-pub use sounds::{add_assets, fonts, languages, packs, panorama, sounds, BUILT_IN_PACKS};
+pub use sounds::{
+    add_assets, fonts, languages, packs, panorama, sounds, wanted_objects, BUILT_IN_PACKS,
+};
 
 use pyjson::Value;
 use sha2::Digest;
@@ -334,6 +341,16 @@ impl Read for JarFile {
         let n = std::os::unix::fs::FileExt::read_at(&*self.file, buf, self.position)?;
         #[cfg(windows)]
         let n = std::os::windows::fs::FileExt::seek_read(&*self.file, buf, self.position)?;
+        // The browser's filesystem has no positioned read: seek and read under one lock.
+        #[cfg(target_arch = "wasm32")]
+        let n = {
+            use std::io::Seek;
+            static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+            let mut file = &*self.file;
+            file.seek(std::io::SeekFrom::Start(self.position))?;
+            file.read(buf)?
+        };
         self.position += n as u64;
         Ok(n)
     }
@@ -439,8 +456,6 @@ struct Run<'a> {
     server_classpath: String,
     /// The client jar and its libraries: the classpath of the client-side exporters.
     client_classpath: String,
-    /// No server jar was found: the client jar is the server side (Prism keeps none).
-    server_from_client: bool,
     /// The compiled exporter classes, or why they didn't compile: one attempt for all lanes.
     bundles: Mutex<Option<Result<PathBuf, String>>>,
     /// The exporter JVMs, which run at the same time: the server's, the client's, and on a
@@ -718,7 +733,6 @@ fn prepare_impl(
                 client: found.jars["client"].clone(),
                 server_classpath: classpath_join(&found.jars["server"], &found.libraries),
                 client_classpath: classpath_join(&found.jars["client"], &client_libraries),
-                server_from_client: found.server_from_client,
                 bundles: Mutex::new(None),
                 workers: [Mutex::new(None), Mutex::new(None), Mutex::new(None)],
                 previous,
@@ -733,7 +747,7 @@ fn prepare_impl(
             // Not current until this preparation finishes: --check says so meanwhile, and
             // after a failure.
             check::remove_stamp(&resources)?;
-            steps(&run, &lock, &oracle, minecraft)?;
+            steps(&run, &oracle, minecraft)?;
             check::write_stamp(&resources)?;
             Ok(resources)
         });
@@ -786,12 +800,7 @@ type Entries = Vec<(&'static str, Value)>;
 /// idle: a 6-core laptop finished its other JVMs 20 s before the server lane.
 const SPLIT_BLOCKS_JOBS: usize = 6;
 
-fn steps(
-    run: &Run,
-    lock: &artifacts::Lock,
-    oracle: &Path,
-    minecraft: Option<&Path>,
-) -> Result<(), String> {
+fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), String> {
     let root = &run.resources;
     let repo = &run.root;
     let server_cp = run.server_classpath.as_str();
@@ -1177,32 +1186,18 @@ fn steps(
             let started = Instant::now();
             let datagen = run.local.join("datagen");
             mkdir(&datagen)?;
-            let log_path = datagen.join("datagen.log");
-            let log = run.log_file(&log_path)?;
-            // A server bundle names the data generator in its manifest; with the client jar as
-            // the server side (a Prism install has no server jar) the classpath names it instead.
-            let args = if run.server_from_client {
-                vec![
-                    "-cp".into(),
-                    run.server_classpath.clone(),
-                    "net.minecraft.data.Main".into(),
-                    "--reports".into(),
-                    "--output".into(),
-                    "out".into(),
-                ]
-            } else {
-                vec![
-                    "-DbundlerMainClass=net.minecraft.data.Main".into(),
-                    "-jar".into(),
-                    arg(&lock.directory.join("jars").join("server.jar")),
-                    "--reports".into(),
-                    "--output".into(),
-                    "out".into(),
-                ]
-            };
-            run.jdk
-                .java(&args, Some(&datagen), &log)
-                .map_err(|e| format!("{e} in the data generator; see {}", log_path.display()))?;
+            // Only the reports Horizon reads, on the server exporter JVM: it shares that JVM's
+            // Bootstrap, and skips the block list, most of the generator's time on a slow JVM.
+            run.export(
+                SERVER_SIDE,
+                "vanilla's data generator reports",
+                server_cp,
+                &datagen,
+                &["HorizonReports"],
+                "2G",
+                &[arg(&datagen.join("out"))],
+                &datagen.join("datagen.log"),
+            )?;
             let reports = datagen.join("out").join("reports");
             install_datagen_reports(root, &reports)?;
             (run.log)(&format!("Ran the data generator{}", took(started)));

@@ -2157,6 +2157,7 @@ version = "0.1.0"
 dependencies = [
  "horizon-client",
  "horizon-client-render",
+ "horizon-prepare",
  "js-sys",
  "wasm-bindgen",
  "wasm-bindgen-futures",

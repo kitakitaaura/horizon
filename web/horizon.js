@@ -17,10 +17,33 @@ if (self.GPUDevice && !GPUDevice.prototype.__horizonDiagnostics) {
   GPUDevice.prototype.__horizonDiagnostics = true;
 }
 
+// Browsers start an AudioContext suspended until the page gets a click or a key, and the game
+// opens its sound output (cpal's Web Audio host) before that: resume every context the page made
+// on each input until they all run.
+if (self.AudioContext && !self.AudioContext.__horizonResume) {
+  const contexts = [];
+  const Base = self.AudioContext;
+  self.AudioContext = class extends Base {
+    constructor(...args) {
+      super(...args);
+      contexts.push(this);
+    }
+  };
+  self.AudioContext.__horizonResume = true;
+  const resume = () => {
+    for (const context of contexts) if (context.state === "suspended") context.resume().catch(() => {});
+  };
+  for (const type of ["pointerdown", "keydown", "touchend"]) addEventListener(type, resume, { capture: true });
+}
+
 // Each pool worker's stack (a Rust thread's): debug builds need far more than release ones.
 const STACK_SIZE = 8 << 20;
 
-export async function start({ reserve = 32 } = {}) {
+/**
+ * `reserve`: idle pool workers kept ready. `jvm`: `{ wasm, jdk, env }` to let preparation start Java
+ * runtimes (jvm/spawner.js): the runtime's .wasm URL, the Java image's base URL, extra variables.
+ */
+export async function start({ reserve = 32, jvm } = {}) {
   if (!crossOriginIsolated) {
     throw new Error("the page needs COOP and COEP headers for shared memory (web/serve.py sends them)");
   }
@@ -32,6 +55,10 @@ export async function start({ reserve = 32 } = {}) {
   // The spawner keeps the pool full from its own thread (spawner.js).
   const spawner = new Worker(new URL("./spawner.js", import.meta.url), { type: "module", name: "horizon spawner" });
   spawner.postMessage({ module, memory: wasm.memory, stackSize: STACK_SIZE, wantedAddr: horizon.poolWantedAddr() });
+  if (jvm) {
+    const jvms = new Worker(new URL("./jvm/spawner.js", import.meta.url), { type: "module", name: "java spawner" });
+    jvms.postMessage({ memory: wasm.memory, mailbox: horizon.jvmMailboxAddr(), ...jvm });
+  }
   // Wait for the reserve before any Rust code spawns.
   while (horizon.poolIdle() < reserve) {
     await new Promise((r) => setTimeout(r, 10));
