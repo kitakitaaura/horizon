@@ -459,8 +459,9 @@ struct Run<'a> {
     /// The compiled exporter classes, or why they didn't compile: one attempt for all lanes.
     bundles: Mutex<Option<Result<PathBuf, String>>>,
     /// The exporter JVMs, which run at the same time: the server's, the client's, and on a
-    /// machine with cores to spare a second server one for the generator's block behaviour.
-    workers: [Mutex<Option<worker::Worker>>; 3],
+    /// machine with cores to spare a second server one for the generator's block behaviour; in
+    /// the browser two more server ones (`SPLIT_SERVER`).
+    workers: [Mutex<Option<worker::Worker>>; 5],
     previous: Value,
     origin: Value,
     /// Progress lines from every lane; the caller's thread prints them.
@@ -581,7 +582,13 @@ impl Run<'_> {
             "VanillaCommandParseOracle" | "VanillaCreativeTabsExporter"
         ) && std::env::var_os("HORIZON_PREPARE_ISOLATED").is_none()
         {
-            let name = ["server", "client", "server-blocks"][worker];
+            let name = [
+                "server",
+                "client",
+                "server-blocks",
+                "server-reports",
+                "server-motion",
+            ][worker];
             let mut worker = self.workers[worker].lock().unwrap();
             if worker.is_none() {
                 *worker = Some(worker::Worker::new(self, name, &classes, classpath)?);
@@ -775,7 +782,7 @@ fn prepare_impl(
                 server_classpath: classpath_join(&found.jars["server"], &found.libraries),
                 client_classpath: classpath_join(&found.jars["client"], &client_libraries),
                 bundles: Mutex::new(None),
-                workers: [Mutex::new(None), Mutex::new(None), Mutex::new(None)],
+                workers: [const { Mutex::new(None) }; 5],
                 previous,
                 origin,
                 log: &say,
@@ -841,6 +848,17 @@ type Entries = Vec<(&'static str, Value)>;
 /// It pays a second Bootstrap and ~400 MB, which only pays off when the other lanes leave cores
 /// idle: a 6-core laptop finished its other JVMs 20 s before the server lane.
 const SPLIT_BLOCKS_JOBS: usize = 6;
+
+/// In the browser a JVM's start (Minecraft's Bootstrap) takes minutes on Ristretto, not seconds,
+/// yet the server JVM's lane took twice as long as any other: the data generator's reports, then
+/// every server step, one after another. There the reports get a server JVM of their own, and so
+/// do movement and attributes with damage and health (a lane of their own), each paying its own
+/// Bootstrap so that no lane is much longer than the rest. Natively one JVM does all of it.
+const SPLIT_SERVER: bool = cfg!(target_arch = "wasm32");
+/// The exporter JVM the data generator's reports run on.
+const REPORTS_WORKER: usize = if SPLIT_SERVER { 3 } else { SERVER_SIDE };
+/// The exporter JVM movement and attributes, and damage and health, run on.
+const MOTION_WORKER: usize = if SPLIT_SERVER { 4 } else { SERVER_SIDE };
 
 fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), String> {
     let root = &run.resources;
@@ -935,34 +953,9 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
     };
     let single = &single;
 
-    // The server exporter JVM, in the order these steps always ran.
-    let server: pool::Lane<Entries> = Box::new(|| {
-        // Every block state and its facts.
-        let facts = root.join("facts.json");
-        let origin_same = run
-            .origin
-            .as_object()
-            .unwrap()
-            .iter()
-            .all(|(k, v)| run.previous(k) == Some(v));
-        run.stage();
-        if !(origin_same
-            && facts.exists()
-            && run.previous("facts_sha256") == Some(&run.file_hash("facts.json")?))
-        {
-            run.export(
-                SERVER_SIDE,
-                "block states",
-                server_cp,
-                &root.join("classes"),
-                &["VanillaHeightmapOracle"],
-                "512M",
-                &["export".into(), arg(&facts)],
-                &root.join("export.log"),
-            )?;
-        }
-        run.checkpoint(vec![("facts_sha256", run.file_hash("facts.json")?)])?;
-
+    // Movement and attributes, then damage and health: on the server JVM after block states, or
+    // in the browser on a lane and JVM of their own (`SPLIT_SERVER`).
+    let motion_and_health = &|| -> Result<(), String> {
         run.stage();
         if !(run.previous("motion_exporters_sha256") == Some(&motion_sources)
             && run.same("server_sha256")
@@ -972,8 +965,9 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
             let export = run.local.join("horizon-client-motion");
             mkdir(&export)?;
             write_json(&export.join("tags.json"), tags)?;
-            run.export(
+            run.export_on(
                 SERVER_SIDE,
+                MOTION_WORKER,
                 "movement and attributes",
                 server_cp,
                 &export.join("classes"),
@@ -1017,8 +1011,9 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
                 }
                 write_json(&export.join(file), &resources)?;
             }
-            run.export(
+            run.export_on(
                 SERVER_SIDE,
+                MOTION_WORKER,
                 "damage and health",
                 server_cp,
                 &export.join("classes"),
@@ -1040,6 +1035,41 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
             ("health_exporters_sha256", health_sources.clone()),
             ("health_files_sha256", run.file_hashes(&health_files)?),
         ])?;
+
+        Ok(())
+    };
+
+    // The server exporter JVM, in the order these steps always ran.
+    let server: pool::Lane<Entries> = Box::new(|| {
+        // Every block state and its facts.
+        let facts = root.join("facts.json");
+        let origin_same = run
+            .origin
+            .as_object()
+            .unwrap()
+            .iter()
+            .all(|(k, v)| run.previous(k) == Some(v));
+        run.stage();
+        if !(origin_same
+            && facts.exists()
+            && run.previous("facts_sha256") == Some(&run.file_hash("facts.json")?))
+        {
+            run.export(
+                SERVER_SIDE,
+                "block states",
+                server_cp,
+                &root.join("classes"),
+                &["VanillaHeightmapOracle"],
+                "512M",
+                &["export".into(), arg(&facts)],
+                &root.join("export.log"),
+            )?;
+        }
+        run.checkpoint(vec![("facts_sha256", run.file_hash("facts.json")?)])?;
+
+        if !SPLIT_SERVER {
+            motion_and_health()?;
+        }
 
         let collision_file = root.join("cached-collision.nbt");
         run.stage();
@@ -1258,8 +1288,9 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
             mkdir(&datagen)?;
             // Only the reports Horizon reads, on the server exporter JVM: it shares that JVM's
             // Bootstrap, and skips the block list, most of the generator's time on a slow JVM.
-            run.export(
+            run.export_on(
                 SERVER_SIDE,
+                REPORTS_WORKER,
                 "vanilla's data generator reports",
                 server_cp,
                 &datagen,
@@ -1268,6 +1299,9 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
                 &[arg(&datagen.join("out"))],
                 &datagen.join("datagen.log"),
             )?;
+            if REPORTS_WORKER != SERVER_SIDE {
+                run.close_worker(REPORTS_WORKER);
+            }
             let reports = datagen.join("out").join("reports");
             install_datagen_reports(root, &reports)?;
             (run.log)(&format!("Ran the data generator{}", took(started)));
@@ -1330,6 +1364,13 @@ fn steps(run: &Run, oracle: &Path, minecraft: Option<&Path>) -> Result<(), Strin
     });
 
     let mut lanes = vec![server, client, reports, files];
+    if SPLIT_SERVER {
+        lanes.push(Box::new(|| {
+            motion_and_health()?;
+            run.close_worker(MOTION_WORKER);
+            Ok(Vec::new())
+        }));
+    }
     if split_blocks {
         // With cores to spare, the generator's block behaviour (a quarter of the server lane's
         // time) runs on a second server JVM beside the first; it pays its own Bootstrap.

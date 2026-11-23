@@ -16,20 +16,22 @@ const PROGRESS = ".horizon-prepare-progress.json";
 const LOCAL = "/.local";
 const LOCAL_STORE = "horizon-prepare-local";
 // How long each Java step took last time (seconds), for its time left: this browser's last run, else
-// these, from runs in Chrome on an M-series Mac with the tab in front (java-w40.wasm, JIT on).
+// these, from a full run in Chrome on a 10-core M-series Mac at full priority (java-w40.wasm, JIT
+// on; 522 s in all). A step that starts a JVM includes its Bootstrap.
 const STEP_SECONDS_KEY = "horizon.prepareStepSeconds";
 const STEP_SECONDS = {
-  "model bindings": 180,
-  "block states": 330,
-  "vanilla's data generator reports": 270,
-  "block behavior": 510,
-  "mob data": 40,
-  "entity models": 10,
-  "command registries": 250,
-  "the creative inventory": 230,
-  "movement and attributes": 270,
-  "gameplay facts": 160,
-  "face visibility": 55,
+  "model bindings": 190,
+  "entity models": 16,
+  "mob data": 75,
+  "command registries": 212,
+  "block states": 245,
+  "collision shapes": 83,
+  "face visibility": 13,
+  "gameplay facts": 165,
+  "movement and attributes": 322,
+  "vanilla's data generator reports": 327,
+  "the creative inventory": 177,
+  "block behavior": 368,
 };
 
 function stepSeconds() {
