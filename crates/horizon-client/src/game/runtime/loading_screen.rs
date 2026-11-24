@@ -500,6 +500,13 @@ impl ApplicationHandler for App {
             Step::Ready(game) => *self = App::Ready(game),
             Step::Done => event_loop.exit(),
             Step::Failed(e) => {
+                // Natively `run` returns this error once the loop exits; the browser's loop never
+                // returns, so say it here (stderr is the console).
+                #[cfg(target_arch = "wasm32")]
+                {
+                    eprintln!("error: Horizon could not start: {e:#}");
+                    log::error!("Horizon could not start: {e:#}");
+                }
                 if let App::Loading(loading) = self {
                     loading.error = Some(e);
                 }
