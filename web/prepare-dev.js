@@ -297,6 +297,11 @@ async function prepareSaying(horizon, output, say) {
       if (news.lines.length) keep();
       if (news.done) {
         if (news.error) throw new Error(news.error);
+        // The sound files came with the rest of the Minecraft folder; `--prepare` leaves that step
+        // out (launch_api.rs), so run it here and the page never has to ask for them again.
+        step("Preparing sounds…");
+        horizon.prepareAssets("sounds", news.output);
+        for (const hash of horizon.prepareWanted("sounds", assetIndex)) horizon.removeFile(`${minecraft}/assets/objects/${hash.slice(0, 2)}/${hash}`);
         await keep();
         // Files a step wrote and then removed (a `.partial` it renamed) were stored on the way.
         const final = horizon.listFiles(resources.ROOT, []).split("\n").filter(Boolean).map((l) => l.split("\t")[0]);
