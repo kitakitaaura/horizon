@@ -526,7 +526,6 @@ dependencies = [
  "tempfile",
  "toml",
  "toml_edit",
- "ureq",
  "wasm-encoder 0.261.0",
  "wasmparser 0.261.0",
  "wat",
@@ -1877,7 +1876,6 @@ dependencies = [
  "horizon-shaders",
  "horizon-system",
  "horizon-telemetry",
- "horizon-theme",
  "horizon-threads",
  "horizon-ureq",
  "horizon-world",
@@ -2169,6 +2167,7 @@ dependencies = [
  "horizon-mod-host",
  "horizon-mod-package",
  "horizon-protocol",
+ "horizon-theme",
  "serde_json",
  "tempfile",
  "winresource",
@@ -2533,6 +2532,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon-name-tag"
+version = "0.1.0"
+dependencies = [
+ "horizon-hooks",
+ "horizon-platform",
+]
+
+[[package]]
 name = "horizon-narrator"
 version = "0.1.0"
 dependencies = [
@@ -2553,9 +2560,11 @@ dependencies = [
  "horizon-friends",
  "horizon-game",
  "horizon-heartbeat",
+ "horizon-name-tag",
  "horizon-official-servers",
  "horizon-perf-share",
  "horizon-platform",
+ "horizon-theme",
  "log",
  "winresource",
 ]

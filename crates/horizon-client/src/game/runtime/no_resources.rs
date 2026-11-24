@@ -130,6 +130,7 @@ impl ApplicationHandler for Missing {
                     None,
                     self.api,
                     false,
+                    horizon_client::graphics::RayTracingMode::Auto,
                 )?;
                 Ok((window, renderer))
             });

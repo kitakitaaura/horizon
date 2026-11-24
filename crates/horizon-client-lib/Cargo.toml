@@ -160,13 +160,15 @@ windows-segment-heap = []
 workspace = true
 
 [dev-dependencies]
-horizon-threads = { path = "../horizon-threads", features = ["test-allocation-probe"] }
+horizon-threads = { path = "../horizon-threads", features = ["test-allocation-probe", "test-game-dir"] }
 horizon-mod-wasm = { path = "../horizon-mod-wasm", features = ["listener-fixture", "test-copy-probe"] }
 tempfile = "3"
 mod_platform = { package = "horizon-mod-api", path = "../horizon-mod-api", features = ["testing"] }
 mod_api = { package = "horizon-mod-vocab", path = "../horizon-mod-vocab", features = ["testing"] }
 # ui_theme's unit tests draw text in the design system's fonts.
 horizon-theme = { path = "../horizon-theme" }
+# dialog_screen's unit tests switch the text direction in a language only their thread sees.
+horizon-client-core = { path = "../horizon-client-core", features = ["test-language-publication"] }
 horizon-client-render = { path = "../horizon-client-render", features = ["test-support"] }
 horizon-items = { path = "../horizon-items", features = ["test-support"] }
 # Reads back the captures the server_perf tests write.
@@ -293,5 +295,7 @@ path = "../horizon-client/examples/chunk_encoding_bench.rs"
 # Disk space (fs4) and the network threads' polling (mio): not in the browser, which has
 # neither (lan/web_poll.rs stands in for mio).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native mods' processes (pipes, sockets): the browser runs no other process.
+horizon-mod-package = { path = "../horizon-mod-package", default-features = false, features = ["index", "junction", "runtime-process"] }
 mio = { version = "1.2.4", features = ["os-poll", "net"] }
 fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
