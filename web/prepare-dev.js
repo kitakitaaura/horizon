@@ -128,7 +128,67 @@ export async function prepareFromServed(horizon, output, options = {}) {
   });
 }
 
-async function prepareAlone(horizon, output, { say = () => {} } = {}) {
+async function prepareAlone(horizon, output, { say: sayInPage = () => {} } = {}) {
+  // Its progress also goes to a small window the player can pop out (`popOut`).
+  const popped = popOut();
+  const say = (text) => {
+    sayInPage(text);
+    popped.say(text);
+  };
+  try {
+    return await prepareSaying(horizon, output, say);
+  } finally {
+    popped.close();
+  }
+}
+
+/**
+ * A "Pop out progress" button (Chrome and Edge: Document Picture-in-Picture). Its small window
+ * stays on top and visible while the player uses other tabs and windows, which also keeps Chrome
+ * from slowing the page down as it does a hidden tab's (about 3x). `say` shows a line there too.
+ */
+function popOut() {
+  if (!("documentPictureInPicture" in window)) return { say() {}, close() {} };
+  let last = "";
+  let line = null;
+  let pip = null;
+  const button = document.createElement("button");
+  button.textContent = "Pop out progress";
+  button.title = "A small window that stays on top, so the preparation keeps its speed while you do something else";
+  button.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:10;font:13px system-ui,sans-serif;padding:8px 12px;border-radius:6px;border:1px solid #555;background:#222;color:#eee;cursor:pointer";
+  button.onclick = async () => {
+    try {
+      pip = await documentPictureInPicture.requestWindow({ width: 420, height: 120 });
+    } catch (e) {
+      console.warn("[prepare] no progress window:", e.message || e);
+      return;
+    }
+    pip.document.title = "Preparing Horizon";
+    pip.document.body.style.cssText = "margin:0;padding:12px;background:#0b0b0d;color:#ddd;font:12px ui-monospace,monospace;white-space:pre-wrap";
+    line = pip.document.createElement("div");
+    line.textContent = last;
+    pip.document.body.append(line);
+    button.hidden = true;
+    pip.addEventListener("pagehide", () => {
+      pip = null;
+      line = null;
+      button.hidden = false;
+    });
+  };
+  document.body.append(button);
+  return {
+    say(text) {
+      last = text;
+      if (line) line.textContent = text;
+    },
+    close() {
+      button.remove();
+      pip?.close();
+    },
+  };
+}
+
+async function prepareSaying(horizon, output, say) {
   const started = performance.now();
   const at = () => `${((performance.now() - started) / 1000).toFixed(1)} s`;
   const step = (text) => {
