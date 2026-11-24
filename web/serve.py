@@ -102,4 +102,6 @@ if __name__ == "__main__":
         MOUNTS[name] = pathlib.Path(folder).expanduser().resolve()
         del args[i : i + 2]
     port = int(args[0]) if args else 8765
+    # The page imports files 16 at a time: the default backlog of 5 drops connections (a timeout).
+    http.server.ThreadingHTTPServer.request_queue_size = 128
     http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
