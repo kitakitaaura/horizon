@@ -1,9 +1,10 @@
-// A whole preparation in the page, from folders web/serve.py serves, while developing (`?prepare`):
-// the Minecraft folder (`--minecraft`), Horizon's exporter sources (`--mount java-src=<repo>/mods/
-// horizon/src/test/java`) and their prebuilt classes (`--mount exporters=<repo>/.local/exporters`,
-// written by a native `horizon-prepare --prepare`), which go into the game's filesystem; then
-// `horizon-prepare --prepare` runs there, its exporters on the page's Java runtimes. Each step's
-// time goes to the console and to `say`.
+// A whole preparation in the page: the player's own Minecraft folder (picked, or a zip of it; while
+// developing, the one web/serve.py `--minecraft` serves), plus the page's preparation kit at `kit`
+// (by default `/mnt`, what serve.py's mounts serve): the Java runtime (`bin/java.wasm`), its Java
+// image (`jdk/`), Horizon's exporter sources (`java-src/`, from mods/horizon/src/test/java) and
+// their prebuilt classes (`exporters/<key>/`, written by a native `horizon-prepare --prepare`).
+// They go into the game's filesystem; then `horizon-prepare --prepare` runs there, its exporters on
+// the page's Java runtimes. Each step's time goes to the console and to `say`.
 
 import { servedFolder } from "./minecraft.js";
 import * as resources from "./resources.js";
@@ -93,9 +94,21 @@ async function forgetLocal() {
   await root.removeEntry(LOCAL_STORE, { recursive: true }).catch(() => {});
 }
 
+/** The Java runtime options for `start` when the kit at `kit` is there, else undefined. */
+export async function kitJvm(kit = "/mnt", { java = "java.wasm", jit = "1" } = {}) {
+  const wasm = `${kit}/bin/${java}`;
+  const found = await fetch(wasm, { method: "HEAD" }).then((r) => r.ok, () => false);
+  return found ? { wasm, jdk: `${kit}/jdk`, env: jit ? { RISTRETTO_JIT: jit } : {} } : undefined;
+}
+
+/** Whether an unfinished preparation waits in the page's storage. */
+export function unfinished() {
+  return resources.storedFile(PROGRESS);
+}
+
 async function index(base) {
   const response = await fetch(`${base}/.index.json`);
-  if (!response.ok) throw new Error(`${base}/.index.json: HTTP ${response.status} (start web/serve.py with that --mount)`);
+  if (!response.ok) throw new Error(`${base}/.index.json: HTTP ${response.status} (this page's preparation kit is missing)`);
   return response.json();
 }
 
@@ -118,8 +131,12 @@ async function copyMount(horizon, base, to) {
   return files.length;
 }
 
-/** Runs the preparation into `output`; resolves with the folder, or rejects with its error. */
-export async function prepareFromServed(horizon, output, options = {}) {
+/**
+ * Runs the preparation into `output`; resolves with the folder, or rejects with its error.
+ * `folder`: the Minecraft folder (`{ name, read(path) }`, minecraft.js pickFolder's or zip.within's;
+ * by default the served one). `kit`: the preparation kit's base URL.
+ */
+export async function prepare(horizon, output, options = {}) {
   // One preparation per browser profile: two tabs would share (and spoil) the stored progress.
   if (!navigator.locks) return prepareAlone(horizon, output, options);
   return navigator.locks.request("horizon-prepare", { ifAvailable: true }, (lock) => {
@@ -128,7 +145,7 @@ export async function prepareFromServed(horizon, output, options = {}) {
   });
 }
 
-async function prepareAlone(horizon, output, { say: sayInPage = () => {} } = {}) {
+async function prepareAlone(horizon, output, { say: sayInPage = () => {}, folder = servedFolder(), kit = "/mnt" } = {}) {
   // Its progress also goes to a small window the player can pop out (`popOut`).
   const popped = popOut();
   const say = (text) => {
@@ -136,7 +153,7 @@ async function prepareAlone(horizon, output, { say: sayInPage = () => {} } = {})
     popped.say(text);
   };
   try {
-    return await prepareSaying(horizon, output, say);
+    return await prepareSaying(horizon, output, say, folder, kit);
   } finally {
     popped.close();
   }
@@ -188,7 +205,7 @@ function popOut() {
   };
 }
 
-async function prepareSaying(horizon, output, say) {
+async function prepareSaying(horizon, output, say, folder, kit) {
   const started = performance.now();
   const at = () => `${((performance.now() - started) / 1000).toFixed(1)} s`;
   const step = (text) => {
@@ -208,17 +225,16 @@ async function prepareSaying(horizon, output, say) {
 
   const pins = JSON.parse(horizon.preparePins());
   const minecraft = pins.minecraft;
-  const folder = servedFolder();
 
   step("Copying Horizon's exporters…");
-  await copyMount(horizon, "/mnt/java-src", SOURCES);
+  await copyMount(horizon, `${kit}/java-src`, SOURCES);
   const key = horizon.prepareExportersKey();
-  const bundles = await index("/mnt/exporters");
+  const bundles = await index(`${kit}/exporters`);
   if (!bundles.some(([path]) => path === `${key}/manifest.json`)) {
     throw new Error(`no prebuilt exporters with key ${key}: run horizon-prepare --prepare natively once`);
   }
   const bundle = bundles.filter(([path]) => path.startsWith(`${key}/`));
-  for (const [path] of bundle) horizon.writeFile(`/exporters/${path.slice(key.length + 1)}`, await fetchBytes(`/mnt/exporters/${path}`));
+  for (const [path] of bundle) horizon.writeFile(`/exporters/${path.slice(key.length + 1)}`, await fetchBytes(`${kit}/exporters/${path}`));
 
   step(`Reading Minecraft ${pins.version} from ${folder.name}…`);
   const response = await fetch(`https://piston-meta.mojang.com/v1/packages/${pins.manifest_sha1}/${pins.version}.json`);
@@ -233,7 +249,9 @@ async function prepareSaying(horizon, output, say) {
   }
   const indexPath = `assets/indexes/${manifest.assetIndex.id}.json`;
   const assetIndex = await folder.read(indexPath);
-  if (!assetIndex) throw new Error(`${folder.name} has no ${indexPath}`);
+  const played = `: pick the folder your launcher plays Minecraft ${pins.version} from, after playing it there once`;
+  if (!assetIndex) throw new Error(`${folder.name} has no ${indexPath}${played}`);
+  if (!(await folder.read(want[0]))) throw new Error(`${folder.name} has no ${want[0]}${played}`);
   horizon.writeFile(`${minecraft}/${indexPath}`, assetIndex);
   const objects = new Set();
   for (const kind of ASSET_KINDS) for (const hash of horizon.prepareWanted(kind, assetIndex)) objects.add(`assets/objects/${hash.slice(0, 2)}/${hash}`);

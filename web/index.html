@@ -20,7 +20,7 @@
   #files code { font: 13px ui-monospace, monospace; background: #1b1b20; padding: 1px 5px; border-radius: 4px; }
   #files .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
   #files button, #files label.button { font: inherit; color: #f2f2f2; background: #26262d; border: 0; border-radius: 999px; padding: 8px 16px; cursor: pointer; }
-  #files label.button { background: #3a5bd9; }
+  #files button.primary { background: #3a5bd9; }
   #files input[type=file] { display: none; }
   #manage { position: fixed; inset: 0; display: none; place-items: center; background: #0b0b0d; z-index: 2; }
   #manage > div { max-width: 520px; padding: 0 16px; line-height: 1.5; }
@@ -33,14 +33,22 @@
   #status { position: fixed; left: 16px; bottom: 16px; max-width: calc(100vw - 32px); white-space: pre-wrap; font: 12px ui-monospace, monospace; opacity: .8; pointer-events: none; }
 </style>
 <div id="files"><div>
-  <h1>Your prepared game files</h1>
-  <p>Horizon doesn't ship Minecraft's files. Prepare them from your own copy of Minecraft: Java
-  Edition with <code>horizon-prepare --prepare</code> (it needs Java), then pick the folder it wrote,
-  <code>.local/horizon-client/26.3</code>, or a zip of it (one Horizon exported on another device
-  works too). They stay in this browser's storage for next time.</p>
+  <h1>Your game files</h1>
+  <p>Horizon doesn't ship Minecraft's files: it prepares them here from your own copy of Minecraft:
+  Java Edition. Pick the folder your launcher plays Minecraft 26.3 from (the official launcher's
+  <code>minecraft</code>, or SKLauncher's or Prism's folder), or a zip of it. Preparing takes about
+  15 minutes; keep this tab in front. The result stays in this browser's storage for next time.</p>
+  <p id="prepare-continue" hidden>A preparation stopped before it finished: pick the same folder
+  to continue it.</p>
+  <div class="row" id="prepare-row">
+    <button id="prepare-folder" class="primary">Pick my Minecraft folder</button>
+    <label class="button">Pick a zip of it<input id="prepare-zip" type="file" accept=".zip,application/zip"></label>
+  </div>
+  <p>Already have them, prepared by <code>horizon-prepare --prepare</code> or exported from Horizon on
+  another device? Pick that folder or zip instead.</p>
   <div class="row">
-    <label class="button">Pick the folder<input id="pick" type="file" webkitdirectory></label>
-    <label class="button">Pick a zip<input id="pick-zip" type="file" accept=".zip,application/zip"></label>
+    <label class="button">Pick prepared files<input id="pick" type="file" webkitdirectory></label>
+    <label class="button">Pick a zip of them<input id="pick-zip" type="file" accept=".zip,application/zip"></label>
     <button id="skip">Start without them</button>
   </div>
 </div></div>
@@ -89,9 +97,10 @@
   const say = (text) => { status.textContent = text; console.log("[horizon page]", text); };
   const params = new URLSearchParams(location.search);
 
-  // The prepared files: the stored copy, else the folder the player picks (or none: the game
-  // then says where to get them).
-  async function gameFiles(horizon) {
+  // The prepared files: the stored copy, else prepared here from the Minecraft folder the player
+  // picks (prepare.js, when `canPrepare`), else a prepared folder or zip they pick (or none: the
+  // game then says where to get them).
+  async function gameFiles(horizon, canPrepare) {
     if (params.has("forget")) await resources.forget();
     // While developing: import what `web/serve.py --resources <folder>` serves.
     if (params.has("fetch")) {
@@ -108,10 +117,48 @@
       return n > 0;
     }
     const panel = document.getElementById("files");
+    document.getElementById("prepare-row").hidden = !canPrepare;
+    if (canPrepare) {
+      const { unfinished } = await import("./prepare.js");
+      document.getElementById("prepare-continue").hidden = !(await unfinished());
+    }
     panel.style.display = "grid";
     try {
       return await new Promise((resolve, reject) => {
         document.getElementById("skip").onclick = () => resolve(false);
+        // Prepare here from the player's Minecraft (`pick` gives its folder): true when done.
+        const prepareFrom = async (pick) => {
+          let folder;
+          try {
+            folder = await pick();
+          } catch (e) {
+            if (e.name !== "AbortError") say(String(e.message || e));
+            return;
+          }
+          if (!folder) return;
+          try {
+            panel.style.display = "none";
+            const { prepare } = await import("./prepare.js");
+            await prepare(horizon, resources.ROOT, { say, folder });
+            resolve(true);
+          } catch (e) {
+            panel.style.display = "grid";
+            document.getElementById("prepare-continue").hidden = false;
+            say("Preparing: " + (e.message || e));
+          }
+        };
+        document.getElementById("prepare-folder").onclick = () => prepareFrom(minecraft.pickFolder);
+        document.getElementById("prepare-zip").onchange = (event) => {
+          const file = event.target.files[0];
+          event.target.value = "";
+          if (!file) return;
+          prepareFrom(async () => {
+            say(`Opening ${file.name}…`);
+            const folder = zip.within(await zip.openZip(file), "assets/indexes");
+            if (!folder) throw new Error(`${file.name} has no assets/indexes folder: zip the Minecraft folder your launcher plays 26.3 from`);
+            return folder;
+          });
+        };
         document.getElementById("pick").onchange = async (event) => {
           try {
             panel.style.display = "none";
@@ -243,18 +290,18 @@
     if (params.has("files")) await manageFiles();
     say("Loading the module…");
     // A debug build's module is about 400 MB: with it, ?reserve=4, or the tab runs out of memory.
-    // ?prepare (while developing): prepare the game files here, the exporters on the page's Java
-    // runtimes (prepare-dev.js; ?java=<.wasm in the bin mount>, ?jit=1).
-    const jvm = params.has("prepare")
-      ? { wasm: `/mnt/bin/${params.get("java") || "java.wasm"}`, jdk: "/mnt/jdk", env: params.has("jit") ? { RISTRETTO_JIT: params.get("jit") } : {} }
+    // Preparing in the page needs its Java runtimes (prepare.js): started only when this browser
+    // keeps no game files yet, or for ?prepare (while developing: prepare from the served folder;
+    // ?java=<.wasm in the kit's bin>, ?jit=<RISTRETTO_JIT>, default 1, empty for off).
+    const { kitJvm } = await import("./prepare.js");
+    const java = { java: params.get("java") || "java.wasm", jit: params.has("jit") ? params.get("jit") : "1" };
+    const jvm = params.has("prepare") || !params.has("fetch") && !(await resources.stored())
+      ? await kitJvm("/mnt", java)
       : undefined;
     // Without its runtime no Java step would ever answer: say so now, not after the first step's
     // wait for one.
-    if (jvm) {
-      const found = await fetch(jvm.wasm, { method: "HEAD" }).then((r) => r.ok, () => false);
-      if (!found) {
-        throw new Error(`No Java runtime at ${jvm.wasm}: name one with ?java=<a .wasm in serve.py's bin mount>, e.g. ?prepare=only&java=java-w40.wasm`);
-      }
+    if (params.has("prepare") && !jvm) {
+      throw new Error(`No Java runtime at /mnt/bin/${java.java}: name one with ?java=<a .wasm in serve.py's bin mount>, e.g. ?prepare=only&java=java-w40.wasm`);
     }
     const horizon = await start({ reserve: Number(params.get("reserve") || 32), jvm });
     window.horizon = horizon;
@@ -275,11 +322,11 @@
     const args = params.getAll("arg");
     if (params.has("prepare")) {
       // It continues an unfinished preparation from the page's storage, else starts afresh.
-      const { prepareFromServed } = await import("./prepare-dev.js");
-      await prepareFromServed(horizon, resources.ROOT, { say });
+      const { prepare } = await import("./prepare.js");
+      await prepare(horizon, resources.ROOT, { say });
       if (params.get("prepare") === "only") throw "paused";
       args.push("--resources", resources.ROOT);
-    } else if (await gameFiles(horizon)) {
+    } else if (await gameFiles(horizon, !!jvm)) {
       args.push("--resources", resources.ROOT);
       await addSounds(horizon);
     }

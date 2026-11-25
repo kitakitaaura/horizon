@@ -1,6 +1,6 @@
-// Horizon's prepared game files in the browser. Horizon ships none of Mojang's files: the player
-// prepares them from their own Minecraft with `horizon-prepare --prepare` (it needs Java, so it
-// runs natively), then picks the folder here, or a zip of it (one this page exported on another
+// Horizon's prepared game files in the browser. Horizon ships none of Mojang's files: the page
+// prepares them from the player's own Minecraft (prepare.js), or the player picks ones prepared
+// elsewhere: `horizon-prepare --prepare`'s folder, or a zip of it (one this page exported on another
 // device too). The files go into the game's in-memory filesystem under ROOT, and a copy into the
 // page's private storage (OPFS), so the next visit loads them from there without asking again.
 

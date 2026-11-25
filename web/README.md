@@ -33,14 +33,19 @@ doesn't matter), and so does a zip of the Minecraft folder for the sound step. `
 panel before the game loads: "Export as zip" writes the stored copy as a zip, to import on another
 device without preparing there, and "Remove" clears it.
 
-Preparing in the page (in progress): `horizon-prepare`'s Java steps run on Java runtimes in the
-page, Ristretto's wasm32-wasip1 build in workers (`jvm/`: `wasi.js` is the WASI layer, `rpc.js` the
-channel through which the JVM's files and streams go to the preparation thread, which answers from
-the game's filesystem; `spawner.js` starts them; crates/horizon-prepare/src/browser_jvm.rs is the
-Rust side). While developing, `?prepare=only&java=<.wasm>&jit=1` runs a whole preparation from
-served folders (`prepare-dev.js`; serve.py `--mount jdk=… bin=… java-src=… exporters=…`, see
-.claude/launch.json). The exporter classes come prebuilt (`/exporters`, the key
-`prepareExportersKey()` names). `jvm-check.html` runs one Java program on a runtime by itself.
+Preparing in the page: with no stored game files, the first panel offers "Pick my Minecraft
+folder" (or a zip of it) and prepares from it here (`prepare.js`), when the page's preparation kit
+is served at `/mnt/`: `bin/java.wasm` (the Java runtime), `jdk/` (its Java image), `java-src/`
+(mods/horizon/src/test/java) and `exporters/<key>/` (the prebuilt exporter classes, the key
+`prepareExportersKey()` names), each folder with its `.index.json` as serve.py's `--mount` writes
+it. Without the kit only the prepared-files pickers show. `horizon-prepare`'s Java steps run on
+Java runtimes in the page, Ristretto's wasm32-wasip1 build in workers (`jvm/`: `wasi.js` is the
+WASI layer, `rpc.js` the channel through which the JVM's files and streams go to the preparation
+thread, which answers from the game's filesystem; `spawner.js` starts them;
+crates/horizon-prepare/src/browser_jvm.rs is the Rust side). While developing,
+`?prepare=only&java=<.wasm>` prepares from the folder serve.py `--minecraft` serves (see
+.claude/launch.json; `?jit=` turns the JIT off). `jvm-check.html` runs one Java program on a
+runtime by itself.
 
 Pages: `index.html` (the game), `smoke.html` (checks of the patched std).
 `index.html` takes `?reserve=N` (idle workers kept ready; 32 by default, 4 with a debug build,
